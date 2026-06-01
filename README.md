@@ -1,7 +1,7 @@
 # CMB Spectral Distortions — Research Project
 
 **Supervisor:** Prof. Nirmal Raj, Indian Institute of Science, Bengaluru
-**Status:** 🚧 Active (May 2026 – present)
+**Status:** Active (May 2026 – present)
 
 ---
 
