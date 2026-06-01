@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Rust
+target/
+
+# Data files (optional, remove if you want to track these)
+*.fits
+*.hdf5
+*.h5
