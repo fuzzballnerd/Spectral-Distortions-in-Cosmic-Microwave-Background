@@ -100,10 +100,11 @@ def cosmic_time(z):
     """
     from scipy import integrate
 
-    def integrand(zp):
-        return 1.0 / ((1.0 + zp) * H(zp))
+    def integrand_log(u):
+        zp = np.exp(u) - 1.0
+        return 1.0 / H(zp)
 
-    val, _ = integrate.quad(integrand, z, 1.0e7, limit=200)
+    val, _ = integrate.quad(integrand_log, np.log1p(z), np.log1p(1.0e7), limit=200)
     return val
 
 

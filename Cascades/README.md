@@ -25,10 +25,11 @@ python3 tests/test_cp8_mpr21.py
 # ── 3. Run the pure-cascade reproduction scripts (no spectroxide needed) ───
 python3 reproduce_ak19_plots.py     # Figs. 1/2/13-style cascade-only plots
 python3 reproduce_fig3.py           # Fig. 3 (electron-only, Eq. A.5/A.6)
+python3 fig3_electron_ic_spectrum.py # Actual Fig. 3
 
-# ── 4. Skipped (require the spectroxide Rust binary, not built here) ───────
-#   fig6_spectrum_via_spectroxide.py
-#   dual_solver_harness.py
+# ── 4. Require the spectroxide Rust binary ───────
+fig6_spectrum_via_spectroxide.py
+dual_solver_harness.py
 # These will fail/degrade gracefully with a clear "spectroxide not available"
 # error rather than crash silently — that's expected without the Rust build.
 
@@ -162,7 +163,7 @@ E_MeV = np.linspace(0.8, 6.0, 400)
 ```
 → `E_MeV = np.linspace(0.8, 6.0, 2000)`
 
-19. **Line 284** — Fig. 14a injection-profile redshift grid:
+19. **Line 282** — Fig. 14a injection-profile redshift grid:
 ```python
 z_grid = np.logspace(np.log10(z_lo), np.log10(z_hi), 200)
 ```
@@ -193,6 +194,5 @@ def decay_convolution_y(species, E0_eV, z_X, tau_X_s, target_y_all_heat=1.5e-5,
 
 ---
 
-Want me to apply all of these now and regenerate the plots (Fig. 3 first, since it's cheapest) so you can see the before/after?
 
 ---------------------------------end------------------------------------------------------------------

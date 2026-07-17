@@ -93,7 +93,7 @@ def run():
 
     results = []
     for E0 in ELECTRON_ENERGIES_EV:
-        delta_I_SI, budget = ics.fig3_style_delta_I(E0, Z_INJ, INJECTED_FRAC, x_grid, E_min_eV=E_MIN_EV)
+        delta_I_SI, budget = ics.fig3_style_delta_I(E0, Z_INJ, INJECTED_FRAC, x_grid, E_min_eV=E_MIN_EV, min_decades_per_e_fold=4)
         delta_I_paper = delta_I_SI * SI_TO_PAPER_UNITS
         results.append({"E0": E0, "delta_I": delta_I_paper, "budget": budget})
         print(f"  E0={E0/1e3:5.0f} keV  f_heat={budget['f_heat']:.3f}  f_ic={budget['f_ic']:.3f}  "

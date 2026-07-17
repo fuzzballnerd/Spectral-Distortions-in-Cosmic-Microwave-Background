@@ -379,7 +379,7 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
             "shape_reliable": shape_reliable, "f_ic_corrected": f_ic_corrected}
 
 
-def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0):
+def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4):
     """
     Occupation-number perturbation delta_n(x) from a single electron burst,
     in spectroxide's own convention (delta_n(x) = [G2_0/x^2] * d(deltaN/N)/dx
@@ -389,7 +389,7 @@ def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_e
     Also passes through electron_ic_spectrum's shape_reliable/f_ic_corrected
     fields -- see that function's docstring for the GeV-scale caveat.
     """
-    spec = electron_ic_spectrum(species_E0_eV, z, x_grid, E_min_eV=E_min_eV)
+    spec = electron_ic_spectrum(species_E0_eV, z, x_grid, E_min_eV=E_min_eV, min_decades_per_e_fold=min_decades_per_e_fold)
     T_K = cosmo.T_gamma(z)
     kT_eV = rates.K_B_EV_PER_K * T_K
 
@@ -405,7 +405,7 @@ def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_e
                       "shape_reliable": spec["shape_reliable"], "f_ic_corrected": spec["f_ic_corrected"]}
 
 
-def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0):
+def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4):
     """
     Convert electron_ic_spectrum's per-electron d(dE)/dx into AK19 Fig. 3's
     plotted quantity: delta_I_nu(x) = (2h nu^3/c^2) * delta_n(x), photon-
@@ -421,7 +421,7 @@ def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV
     TODAY's T_CMB0 since x is redshift-invariant) and budget carries
     f_heat/f_ic (plus shape_reliable/f_ic_corrected) for the cross-check.
     """
-    delta_n, budget = electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=E_min_eV)
+    delta_n, budget = electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=E_min_eV, min_decades_per_e_fold=min_decades_per_e_fold)
 
     # I_nu = 2h nu^3/c^2 * n(x), nu = x*kT/h -- full SI unit conversion.
     # Use TODAY's T_CMB0 here (not T(z), used above only to get delta_n(x)
