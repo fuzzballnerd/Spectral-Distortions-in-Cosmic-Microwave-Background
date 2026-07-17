@@ -104,7 +104,7 @@ def cosmic_time(z):
         zp = np.exp(u) - 1.0
         return 1.0 / H(zp)
 
-    val, _ = integrate.quad(integrand_log, np.log1p(z), np.log1p(1.0e7), limit=200)
+    val, _ = integrate.quad(integrand_log, np.log1p(z), np.log1p(1.0e7), limit=500, epsrel=1e-10)
     return val
 
 

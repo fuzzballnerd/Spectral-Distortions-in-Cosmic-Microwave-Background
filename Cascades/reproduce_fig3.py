@@ -51,7 +51,7 @@ Z_INJ = 20000.0
 INJECTED_FRAC = 1.0e-5
 ELECTRON_ENERGIES_EV = [1.0e4, 3.0e4, 5.0e4, 7.0e4]  # 10/30/50/70 keV
 
-X_MIN, X_MAX, N_X = 0.05, 20.0, 600
+X_MIN, X_MAX, N_X = 0.05, 20.0, 4000
 E_MIN_EV = 100.0  # cooling-track floor (well below all four injection energies)
 
 PLOT_FILE = "fig3_reproduce.png"

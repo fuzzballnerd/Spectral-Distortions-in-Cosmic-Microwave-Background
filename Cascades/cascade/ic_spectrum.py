@@ -126,7 +126,7 @@ def _t_domain(p):
     return np.exp(-bound), np.exp(bound)
 
 
-def mean_t_relativistic(p, n=4000):
+def mean_t_relativistic(p, n=30000):
     """
     <t> = integral t*P(t;p) dt / integral P(t;p) dt over the kinematic
     domain, i.e. the mean dimensionless output-photon frequency for one
@@ -308,7 +308,7 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
     E_edges = np.geomspace(E0_eV, E_min_eV, n_decades + 1)
 
     seed_shape = _planck_number_shape(x_grid)
-    x0_grid = np.geomspace(1e-3, 30.0, 300)  # seed-frequency integration grid for the convolution
+    x0_grid = np.geomspace(1e-3, 30.0, 4000)  # seed-frequency integration grid for the convolution
 
     d_dE_dx = np.zeros_like(x_grid)
     heat_energy = 0.0

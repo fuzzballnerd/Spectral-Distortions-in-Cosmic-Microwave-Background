@@ -28,8 +28,8 @@ python3 reproduce_fig3.py           # Fig. 3 (electron-only, Eq. A.5/A.6)
 python3 fig3_electron_ic_spectrum.py # Actual Fig. 3
 
 # ── 4. Require the spectroxide Rust binary ───────
-fig6_spectrum_via_spectroxide.py
-dual_solver_harness.py
+python3 fig6_spectrum_via_spectroxide.py
+python3 dual_solver_harness.py
 # These will fail/degrade gracefully with a clear "spectroxide not available"
 # error rather than crash silently — that's expected without the Rust build.
 
