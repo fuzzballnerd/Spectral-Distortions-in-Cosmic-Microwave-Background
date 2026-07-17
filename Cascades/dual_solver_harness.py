@@ -300,21 +300,150 @@ def test_x_cut_sensitivity(species="e", E0_eV=1.0e4, z_inj=1.0e4,
     return report
 
 
+def make_fig10_style_plot(species, E0_eV_list, z_inj_list,
+                           injected_frac_rho_cmb=1.0e-5, x_max=35.0,
+                           x_check_max=20.0, output_path="dual_solver_fig10_style.png"):
+    """
+    AK19 Fig. 10-style comparison plot: one row per E0 in E0_eV_list, two
+    panels per row -- left = Kompaneets kernel (spectroxide PDE), right =
+    Recoil-only (this codebase's standalone electron-IC spectrum) -- each
+    overlaying every z_inj in z_inj_list, same convention as
+    recoil_only_solver.py's single-panel make_fig10_style_plot but with
+    both solver sides side by side (and driven by this file's own
+    compare_solvers/run_kompaneets_side/run_recoil_only_side, which are
+    what's actually wired to this harness).
+
+    If spectroxide isn't available (or a given point's Kompaneets solve
+    raises), that panel is left blank with an explanatory note rather than
+    failing the whole plot -- the Recoil-only side and the figure itself
+    still get produced.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_rows = len(E0_eV_list)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(12, 5 * n_rows), squeeze=False)
+    colors = plt.cm.plasma(np.linspace(0.15, 0.85, len(z_inj_list)))
+
+    for row, E0_eV in enumerate(E0_eV_list):
+        ax_komp, ax_recoil = axes[row]
+        any_kompaneets = False
+
+        for z_inj, color in zip(z_inj_list, colors):
+            r_recoil = run_recoil_only_side(species, E0_eV, z_inj, injected_frac_rho_cmb)
+            ax_recoil.plot(r_recoil["x"], r_recoil["delta_I"] * 1.0e23,
+                            color=color, label=f"z={z_inj:.0e}")
+
+            if HAVE_SPECTROXIDE:
+                try:
+                    r_komp = run_kompaneets_side(species, E0_eV, z_inj,
+                                                  injected_frac_rho_cmb, x_max=x_max)
+                    nu_ghz, delta_I_jy = _delta_n_to_delta_I_paper_units(r_komp["x"], r_komp["delta_n"])
+                    ax_komp.plot(r_komp["x"], delta_I_jy, color=color, label=f"z={z_inj:.0e}")
+                    any_kompaneets = True
+                except Exception as e:
+                    print(f"  [warn] Kompaneets side failed for E0={E0_eV:.2e} eV, "
+                          f"z_inj={z_inj:.2e}: {e}")
+
+        for ax in (ax_komp, ax_recoil):
+            ax.axhline(0, color="gray", lw=0.5)
+            ax.set_xlabel(r"$x = h\nu/kT$")
+            ax.set_xlim(0, x_check_max)
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=8)
+        ax_komp.set_title(f"{title_species(species)}, {E0_eV/1.0e3:.0f} keV -- Kompaneets kernel")
+        ax_recoil.set_title(f"{title_species(species)}, {E0_eV/1.0e3:.0f} keV -- Recoil-only")
+        ax_komp.set_ylabel(r"$\delta I_\nu$ ($10^{-23}$ W m$^{-2}$ Hz$^{-1}$ sr$^{-1}$)")
+
+        if not HAVE_SPECTROXIDE:
+            ax_komp.text(0.5, 0.5, "spectroxide not available\n(binary not built)",
+                         ha="center", va="center", transform=ax_komp.transAxes, fontsize=10, color="gray")
+        elif not any_kompaneets:
+            ax_komp.text(0.5, 0.5, "Kompaneets solve failed\n(see console warnings)",
+                         ha="center", va="center", transform=ax_komp.transAxes, fontsize=10, color="gray")
+
+    fig.suptitle("AK19 Fig. 10-style dual-solver comparison "
+                  f"(one-time burst, {injected_frac_rho_cmb:.0e}"
+                  r" $\times\ \rho_{CMB}$)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    print(f"\nSaved {output_path}")
+    return output_path
+
+
+def title_species(species):
+    return "e-" if species in ("e", "e+") else species
+
+
+def _delta_n_to_delta_I_paper_units(x, delta_n):
+    """Convert spectroxide's delta_n(x) directly to AK19's plotted
+    delta_I_nu units (1e-23 W/m^2/Hz/sr), reusing spectroxide's own
+    physical normalization rather than re-deriving it, for an apples-to-
+    apples y-axis against the Recoil-only panel (which is already in
+    1e-23 W/m^2/Hz/sr via ics.fig3_style_delta_I's own convention, printed
+    with *1e23 in __main__)."""
+    from spectroxide.greens import delta_n_to_delta_I
+    nu_ghz, delta_I_jy = delta_n_to_delta_I(x, delta_n)
+    # Jy/sr = 1e-26 W m^-2 Hz^-1 sr^-1 -> 1e-23 W m^-2 Hz^-1 sr^-1
+    return nu_ghz, delta_I_jy * 1.0e-3
+
+
+
 if __name__ == "__main__":
-    # Runs the part of this harness that doesn't need spectroxide's binary
-    # (Recoil-only side, both electron energies Fig. 10 actually uses), so
-    # this file is at least partially verifiable in this sandbox; the
-    # Kompaneets-kernel side and the x_cut sensitivity test need to be run
-    # where the binary is built (see module docstring).
+    # BUG FIX: this block previously only ever ran the Recoil-only loop.
+    # When HAVE_SPECTROXIDE was False it printed an explanatory note and
+    # stopped; when HAVE_SPECTROXIDE was True (as in an environment with
+    # the Rust binary actually built) it did *exactly the same thing* --
+    # the Kompaneets side was never attempted and no figure was ever saved,
+    # regardless of whether spectroxide was available. That's the reason a
+    # run with HAVE_SPECTROXIDE=True still produced only the Recoil-only
+    # console lines and no output file.
     print(f"HAVE_SPECTROXIDE = {HAVE_SPECTROXIDE}\n")
-    for E0 in (1.0e4, 1.0e5):
-        for z_inj in (1.0e4, 2.0e4, 3.0e4, 4.0e4):
+    E0_LIST = (1.0e4, 1.0e5)
+    Z_INJ_LIST = (1.0e4, 2.0e4, 3.0e4, 4.0e4)
+
+    for E0 in E0_LIST:
+        for z_inj in Z_INJ_LIST:
             r = run_recoil_only_side("e", E0, z_inj)
             print(f"  Recoil-only  E0={E0/1e3:6.0f} keV  z_inj={z_inj:.0e}  "
                   f"f_heat={r['budget']['f_heat']:.3f}  f_ic={r['budget']['f_ic']:.3f}  "
                   f"peak={r['delta_I'].max()*1e23:.3g}  dip={r['delta_I'].min()*1e23:.3g} (1e-23 W/m^2/Hz/sr)")
 
+            if HAVE_SPECTROXIDE:
+                try:
+                    rk = run_kompaneets_side("e", E0, z_inj)
+                    peak = rk["delta_n"].max()
+                    dip = rk["delta_n"].min()
+                    print(f"  Kompaneets   E0={E0/1e3:6.0f} keV  z_inj={z_inj:.0e}  "
+                          f"f_heat={rk['budget']['f_heat']:.3f}  f_ic={rk['budget']['f_ic']:.3f}  "
+                          f"y={rk['y']:.3e}  mu={rk['mu']:.3e}  "
+                          f"delta_n(peak/dip)={peak:.3g}/{dip:.3g}")
+                except Exception as e:
+                    print(f"  Kompaneets   E0={E0/1e3:6.0f} keV  z_inj={z_inj:.0e}  "
+                          f"FAILED: {e}")
+            else:
+                print(f"  Kompaneets   E0={E0/1e3:6.0f} keV  z_inj={z_inj:.0e}  "
+                      f"SKIPPED (spectroxide not importable / binary not built)")
+
     if not HAVE_SPECTROXIDE:
-        print("\nspectroxide's Rust binary is not buildable in this sandbox "
-              "(see module docstring) -- Kompaneets-kernel side and the "
-              "x_cut sensitivity test were not run here.")
+        print("\nspectroxide's Rust binary is not importable here -- "
+              "Kompaneets-kernel side and the x_cut sensitivity test were "
+              "skipped above; the plot below will still be produced with "
+              "the Recoil-only panels filled in and the Kompaneets panels "
+              "left blank with an explanatory note.")
+
+    print()
+    print("Building Fig. 10-style dual-solver plot...")
+    make_fig10_style_plot("e", E0_LIST, Z_INJ_LIST,
+                           output_path="/mnt/user-data/outputs/dual_solver_fig10_style.png")
+
+    if HAVE_SPECTROXIDE:
+        print("\nRunning x_cut sensitivity check (AK19's own x=30/25 cross-check)...")
+        try:
+            report = test_x_cut_sensitivity()
+            for x_max, r in report.items():
+                print(f"  x_max={x_max}: max relative diff (x<=20) vs x_max=35 baseline "
+                      f"= {r['max_rel_diff_x_le_20']:.3e}")
+        except Exception as e:
+            print(f"  x_cut sensitivity check failed: {e}")

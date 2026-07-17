@@ -259,11 +259,57 @@ def run_cp7_check(species="e", E0_eV=1.0e8, z_X=2.0e4, tau_X_s=1.0e11,
             "per plan Sec 7."
         )
 
-    dq_dz, f_X = make_dq_dz(species, E0_eV, z_X, tau_X_s, target_y_all_heat)
-    photon_source = make_photon_source(species, E0_eV, z_X, tau_X_s, f_X)
+    # X_MAX_SPX: shared cutoff for spectroxide's frequency grid AND the
+    # photon-source line's x_cut, so they can't drift apart (BUG FIX --
+    # previously make_photon_source's x_max_factor default (35.0) and
+    # spectroxide.solve's own x_max default (30.0) disagreed, so the
+    # photon-channel line -- placed near x_eff~34.6 for this scenario's
+    # parameters -- landed almost entirely outside the solver's actual
+    # x-grid and its energy was lost).
+    X_MAX_SPX = 35.0
 
-    spx_result = spectroxide.solve(method="pde", dq_dz=dq_dz, photon_source=photon_source,
-                                    z_start=z_start, z_end=z_end)
+    dq_dz, f_X = make_dq_dz(species, E0_eV, z_X, tau_X_s, target_y_all_heat)
+    photon_source = make_photon_source(species, E0_eV, z_X, tau_X_s, f_X,
+                                        x_max_factor=X_MAX_SPX)
+
+    # BUG FIX: spectroxide.solve()'s PDE dispatch is an if/elif chain
+    # (injection -> dq_dz -> photon_source), so passing both dq_dz and
+    # photon_source in a single call silently drops photon_source entirely
+    # (dq_dz wins the elif). Mirror the pattern already validated in
+    # fig6_spectrum_via_spectroxide.py / dual_solver_harness.py: call solve()
+    # once per channel and sum the resulting spectra, which is exact at this
+    # order (superposition of two independent linear injections into the
+    # same PDE, ΔE/ρ ~ 1e-5).
+    spx_heat = spectroxide.solve(method="pde", dq_dz=dq_dz,
+                                  z_start=z_start, z_end=z_end,
+                                  x_max=X_MAX_SPX)
+    spx_photon = spectroxide.solve(method="pde", photon_source=photon_source,
+                                    z_start=z_start, z_end=z_end,
+                                    x_max=X_MAX_SPX)
+
+    # Both calls above use spectroxide's default x grid (no custom `x=`
+    # passed to either), so the grids should be identical and delta_n can
+    # be summed directly -- but verify rather than assume (same safety
+    # check used in fig6_spectrum_via_spectroxide.py).
+    if not np.allclose(spx_heat.x, spx_photon.x):
+        raise RuntimeError(
+            "heat and photon spectroxide.solve() calls returned different "
+            "x grids -- cannot sum delta_n directly; pass an explicit "
+            "shared x= to both calls."
+        )
+
+    delta_n_total = spx_heat.delta_n + spx_photon.delta_n
+    spx_result = spectroxide.SolverResult(
+        x=spx_heat.x,
+        delta_n=delta_n_total,
+        mu=spx_heat.mu + spx_photon.mu,
+        y=spx_heat.y + spx_photon.y,
+        delta_rho_over_rho=spx_heat.delta_rho_over_rho + spx_photon.delta_rho_over_rho,
+        method="pde",
+        z_h=spx_heat.z_h,
+        rho_e=spx_heat.rho_e,
+        accumulated_delta_t=spx_heat.accumulated_delta_t,
+    )
 
     y_cp6, *_ = sb.decay_convolution_y(species, E0_eV, z_X, tau_X_s, target_y_all_heat)
 
