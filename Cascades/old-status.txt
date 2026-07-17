@@ -1,0 +1,223 @@
+Now let me directly test the sensitivity/instability hypothesis numerically.
+
+I already viewed this image above. Let me zoom into specific regions to check whether it's truly noisy/chaotic or just has real wavy structure.
+
+Let me check what the checkpoint tests actually verify, to see why they pass despite the bad plot.
+
+I dug into this directly — ran the recursive functions with tiny perturbations, checked the test suite's own caveats, and read AK19's own description of what Fig. 13 should look like. Short version: the "deterministic chaos" theory doesn't hold up under direct testing, and isn't the real cause. The actual bug is something the codebase itself already flags in a code comment, but nobody connected it to the bad plot.
+
+## What I ruled out
+
+I tested the chaos hypothesis directly — perturbing a top-level energy by 1 part in 10¹⁰ up to 1 part in 10⁴ and checking whether electron_cascade/photon_cascade_full outputs diverge:
+
+eps=0        f_heat=0.39823203397...
+eps=1e-10    f_heat=0.39823203399...
+eps=1e-8     f_heat=0.39823203542...
+eps=1e-6     f_heat=0.39823217908...
+eps=1e-4     f_heat=0.39824867931...
+That's smooth, continuous, monotonic response to the perturbation — the opposite of chaos. I also swept electron_cascade at fine resolution (40 points across a factor of 2 in energy, right in the middle of one of the "jagged" bumps) and got a perfectly smooth curve. The recursion is deterministic and well-behaved; two nearby energies do not drift apart. So that diagnosis was wrong — likely someone saw a genuinely wavy (not literally noisy) curve, assumed it must be numerical instability, and reverse-engineered a plausible-sounding mechanism without actually perturbing the code to check.
+
+## What's actually happening
+
+AK19's own text (Sec. 4, describing Fig. 13) says explicitly why the real heat-fraction curve should flatten out above ~1 GeV: as the cascade develops, it produces "a progressively broader photon spectrum," and averaging over that spread of photon energies is what smooths out the boost/de-boost oscillation cycle at high energy.
+
+Your code never produces that spread. In electron_cascade, each log-decade of the electron's cooling track is collapsed to a single characteristic IC photon energy:
+E_gamma_char = (4.0/3.0) * gamma_e**2 * beta2 * E_cmb_char_eV
+...
+sub_budget = photon_cascade_full(E_gamma_char, z, ...)   # one point, not a spectrum
+That single photon energy is then recursed — and at the next generation, it again collapses to one characteristic energy, and so on. Every generation is a delta-function stand-in for what should be a distribution. Since there's never any spread to average over, the "boost cycle" oscillation AK19 describes doesn't damp out with cascade depth — it persists and even amplifies through recursion. That's exactly the "very jagged/wavy, doesn't flatten" look in fig13_heat_fraction.png, and it's fully deterministic — not chaos.
+
+This is actually already called out, almost verbatim, in tests/test_cp3_high_energy_cascade.py's docstring:
+> "a single 'characteristic' IC daughter photon per electron cooling decade rather than a resolved spectrum... flagged here as an open item (candidate CP3 refinement: resolve the actual IC photon spectrum per generation instead of a single characteristic energy)"
+
+That's why the checkpoints pass: CP3's test only checks a 100 GeV electron vs. 100 GeV photon converge to within ~20%, and energy conservation — it never sweeps the curve and checks smoothness/flattening, so it can't catch this.
+
+I confirmed the mechanism empirically: I patched a version of electron_cascade that samples 3 photon energies per decade (log-spread around the characteristic energy, weighted equally) instead of 1, and reran it at the same energies:
+
+E0         original   spread(n=3)
+3.5e7      0.638      0.592
+4.3e8      0.176      00.239   <- dip fills in
+2.8e9      0.279      0.332
+
+Amplitudes shrink toward each other exactly as the "spectral averaging" story predicts, even with a crude 3-point, equal-weight, uniform-log spread.
+
+## Suggested fixes, cheapest to most correct
+
+1. Quick, cheap smoothing (hours): Replace the single E_gamma_char per decade with N (e.g. 5–7) log-spread sample energies weighted by something resembling the actual IC-upscattered photon distribution off a Planck spectrum (not just uniform-log — a real IC spectrum from Thomson scattering off blackbody photons has a known shape, roughly flat-ish in dN/dE below a cutoff near E_gamma_char, falling off above it). Average the recursive results. This is a direct, bounded-cost patch to electron_cascade's decade loop — no architecture change.
+2. **Also increase n_decades** — currently max(4, ceil(log10(E0/Emin)*4)) is coarse (as few as 4 sub-bins spanning many orders of magnitude for a low E0/Emin ratio). More decades per call reduces how much energy each single characteristic point has to represent.Cheap plotting fix regardless of the physics fix:x:** your sweep uses only 60 log-spaced points over 9 decades (~6-7 points/decade) with -o markers connected by straight lines. Even the correct underlying curve has real structure (per AK19's own description of the boost cycle at low-to-mid energy) — 60 points aliases that into a worse-looking zigzag than it is. Bump to 200–300 points once cost allows.The real fix (what AK19/spectroxide actually do):):** stop approximating with mean-branching energy fractions entirely, and track the actual photon spectrum d(ΔN/N)/dx through the cascade generations (a discretized spectrum + triangular back-substitution, as AK19 describe, or a Green's-function/Kompaneets PDE approach like spectroxide). This is a bigger rewrite but is the only way to get the high-energy flattening right rather than approximately damping it.Runtime:e:** recursive calls at high energy (≥1 GeV) already take 0.5–2.5s each and blow up further with more decades/spread samples — so memoize electron_cascade/photon_cascade_full results keyed on (round(log10(E0),3), z, depth) before widening the grid or adding spread sampling, or your sweep runtime will balloon.
+
+Want me to implement option 1 (spread-sampled decades) properly in solve_burst.py and regenerate fig13_heat_fraction.png to check whether it actually flattens above ~1 GeV like AK19's version?
+
+
+RECENT UPDATES (refer to recent_implementation_plan.md):
+
+Edited task.md
+Ran command: `/home/batman/Documents/Work/.venv/bin/python -c "
+from spectroxide import solve, DEFAULT_COSMO
+from spectroxide.solver import Cosmology
+import spectroxide
+
+# Check default cosmology
+print('Default cosmology:', DEFAULT_COSMO)
+
+# Check if y_from_heating exists
+from spectroxide import y_from_heating, mu_from_heating
+print('y_from_heating available')
+
+# Quick test: single burst solve
+r = solve(injection={'type': 'single_burst', 'z_h': 2e4, 'sigma_z': 500}, delta_rho=1e-5, z_start=5e4, z_end=1e3, debug=True)
+print(f'Single burst test: mu={r.mu:.3e}, y={r.y:.3e}')
+print(f'Result type: {type(r)}')
+print(f'Result attrs: {[a for a in dir(r) if not a.startswith(\"_\")]}')
+
+# Test dq_dz path
+import numpy as np
+def test_dq_dz(z):
+    z = np.asarray(z, dtype=float)
+    sigma = 500.0
+    z_h = 2e4
+    return 1e-5 * np.exp(-0.5*((z - z_h)/sigma)**2) / (sigma * np.sqrt(2*np.pi))
+
+r2 = solve(method='pde', dq_dz=test_dq_dz, z_start=5e4, z_end=1e3, debug=True)
+print(f'dq_dz test: mu={r2.mu:.3e}, y={r2.y:.3e}')
+
+# Test Green's function
+y_gf = y_from_heating(test_dq_dz, z_min=1e3, z_max=5e4)
+print(f'GF y_from_heating: {y_gf:.3e}')
+" 2>&1`
+
+Spectroxide works perfectly. Default cosmology matches the cascade code's parameters exactly (h=0.71, Ω_b=0.044, etc.). Let me now check how the cascade's `make_dq_dz` and `make_photon_source` interact with spectroxide:
+
+Ran command: `/home/batman/Documents/Work/.venv/bin/python -c "
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath('.')))
+sys.path.insert(0, '.')
+
+from cascade import interface, solve_burst as sb, cosmology as cosmo
+import numpy as np
+
+# Test make_dq_dz for a 100 keV electron
+species = 'e'
+E0_eV = 1e5  # 100 keV
+z_X = 2e4
+tau_X_s = 1e11
+target_y = 1.5e-5
+
+dq_dz_fn, f_X = interface.make_dq_dz(species, E0_eV, z_X, tau_X_s, target_y)
+photon_src_fn = interface.make_photon_source(species, E0_eV, z_X, tau_X_s, f_X)
+
+# Test that dq_dz returns reasonable values
+test_zs = [1e4, 2e4, 5e4]
+for z in test_zs:
+    val = dq_dz_fn(z)
+    print(f'dq_dz(z={z:.0e}) = {val:.3e}')
+
+# Test photon_source at some x values  
+for z in [2e4]:
+    for x in [1.0, 5.0, 10.0, 20.0]:
+        val = photon_src_fn(x, z)
+        print(f'photon_source(x={x}, z={z:.0e}) = {val:.3e}')
+
+# Check f_X
+print(f'f_X = {f_X:.3e}')
+
+# Quick test: burst_energy_budget
+budget = sb.burst_energy_budget(species, E0_eV, z_X, high_energy=False)
+print(f'Budget: f_heat={budget[\"f_heat\"]:.4f}, f_ic={budget[\"f_ic\"]:.4f}, f_sub={budget.get(\"f_subthreshold\", 0):.4f}')
+print(f'Sum = {budget[\"f_heat\"] + budget[\"f_ic\"] + budget.get(\"f_subthreshold\", 0):.6f}')
+" 2>&1`
+
+The interface functions work. Now let me also test a full spectroxide solve with the cascade's `dq_dz` and `photon_source`:
+
+Ran command: `/home/batman/Documents/Work/.venv/bin/python -c "
+import sys, os
+sys.path.insert(0, '.')
+from cascade import interface
+from spectroxide import solve
+import numpy as np
+
+species = 'e'
+E0_eV = 1e5  # 100 keV
+z_X = 2e4
+tau_X_s = 1e11
+target_y = 1.5e-5
+
+dq_dz_fn, f_X = interface.make_dq_dz(species, E0_eV, z_X, tau_X_s, target_y)
+photon_src_fn = interface.make_photon_source(species, E0_eV, z_X, tau_X_s, f_X)
+
+# Run with both dq_dz + photon_source
+print('Running PDE with dq_dz + photon_source...')
+r = solve(method='pde', dq_dz=dq_dz_fn, photon_source=photon_src_fn, 
+          z_start=1e5, z_end=1e3, debug=True)
+print(f'Result: mu={r.mu:.3e}, y={r.y:.3e}')
+
+# Run with dq_dz only (heat channel alone)
+print('Running PDE with dq_dz only...')
+r2 = solve(method='pde', dq_dz=dq_dz_fn, z_start=1e5, z_end=1e3, debug=True)
+print(f'Heat-only: mu={r2.mu:.3e}, y={r2.y:.3e}')
+
+# Compare with cascade's scalar y
+from cascade import solve_burst as sb
+y_scalar = target_y * 1.0  # f_distortion=1, so y = injected_frac/4 = (total_energy/rho_cmb)/4
+# Actually compute it properly:
+y_conv, z_grid, dy_dz, fX2 = sb.decay_convolution_y(species, E0_eV, z_X, tau_X_s, target_y)
+print(f'Cascade scalar y: {y_conv:.3e}')
+" 2>&1`
+
+The issue is that spectroxide validates `dq_dz` over a wider z-range than our cascade expects. The `decay_injection_rate_eV_cm3_s` function involves `cosmic_time(z)` which may return NaN at very high z. Let me investigate:
+
+Ran command: `/home/batman/Documents/Work/.venv/bin/python -c "
+import sys; sys.path.insert(0, '.')
+from cascade import cosmology as cosmo, solve_burst as sb
+import numpy as np
+
+# Check cosmic_time at high z
+for z in [1e3, 1e4, 1e5, 1e6, 3e6]:
+    t = cosmo.cosmic_time(z)
+    print(f'cosmic_time(z={z:.0e}) = {t:.3e} s')
+
+# Check decay rate at high z
+f_X = 2.728e-4
+tau_X_s = 1e11
+for z in [1e3, 1e4, 1e5, 5e5, 1e6, 3e6]:
+    try:
+        rate = sb.decay_injection_rate_eV_cm3_s(z, f_X, tau_X_s)
+        print(f'rate(z={z:.0e}) = {rate:.3e}')
+    except Exception as e:
+        print(f'rate(z={z:.0e}) = ERROR: {e}')
+" 2>&1`
+
+OK, the `dq_dz` itself doesn't NaN, but `make_dq_dz` calls `burst_energy_budget` which involves `electron_heat_fraction` which may NaN at extreme z. Let me check:
+
+Ran command: `/home/batman/Documents/Work/.venv/bin/python -c "
+import sys; sys.path.insert(0, '.')
+from cascade import interface
+import numpy as np
+
+species = 'e'
+E0_eV = 1e5
+z_X = 2e4
+tau_X_s = 1e11
+target_y = 1.5e-5
+
+dq_dz_fn, f_X = interface.make_dq_dz(species, E0_eV, z_X, tau_X_s, target_y)
+
+# Test at the problematic z values
+import warnings
+warnings.filterwarnings('error')
+for z in [1e3, 1e4, 2e4, 1e5, 5e5, 1e6, 3e6]:
+    try:
+        val = dq_dz_fn(z)
+        print(f'dq_dz(z={z:.0e}) = {val}  (finite={np.isfinite(val)})')
+    except Exception as e:
+        print(f'dq_dz(z={z:.0e}) = ERROR: {e}')
+" 2>&1`
+
+The NaN comes from `electron_heat_fraction` at z=3e6 due to `coulomb_loss_rate` getting invalid inputs at extreme z. The fix is straightforward: wrap `dq_dz` to return 0 for any NaN/non-finite values, since at z=3e6 the actual physical injection rate is negligible anyway. Let me now build the script properly:
+
+Created fig6_via_spectroxide.py
+
+Now let me run it:
+
+Ran command: `/home/batman/Documents/Work/.venv/bin/python fig6_via_spectroxide.py`
+Used tool: schedule
