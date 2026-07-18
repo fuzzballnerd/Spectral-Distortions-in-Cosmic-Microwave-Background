@@ -70,7 +70,7 @@ def electron_heat_fraction(E0_eV, z, E_min_eV=1000.0):
     if E0_eV <= E_min_eV:
         return 1.0  # entirely sub-threshold, Coulomb-dominated -> heat
 
-    val, _ = integrate.quad(branch, E_min_eV, E0_eV, limit=400, epsrel=1e-10)
+    val, _ = integrate.quad(branch, E_min_eV, E0_eV, limit=200)
     return np.clip(val / E0_eV, 0.0, 1.0)
 
 
@@ -653,7 +653,7 @@ def decay_injection_rate_eV_cm3_s(z, f_X, tau_X_s):
     return f_X * rho_dm_eV_cm3(z) / tau_X_s * np.exp(-cosmo.cosmic_time(z) / tau_X_s)
 
 
-def build_zinj_grid(tau_X_s, n_z=200, t_min_factor=1.0e-2, t_max_factor=30.0):
+def build_zinj_grid(tau_X_s, n_z=40, t_min_factor=1.0e-2, t_max_factor=30.0):
     """
     Build a log-spaced grid of injection redshifts spanning the decay's
     active e-folds (plan Sec 3.6, "~30-100 log-spaced values spanning the
@@ -704,7 +704,7 @@ def convolve_generic_injection_y(species, E0_eV, injection_rate_eV_cm3_s_fn, z_g
 
 
 def decay_convolution_y(species, E0_eV, z_X, tau_X_s, target_y_all_heat=1.5e-5,
-                         n_z=200, high_energy=None):
+                         n_z=40, high_energy=None):
     """
     CP6 headline calculation: total y-distortion from a continuously
     injecting, exponentially-decaying particle species, computed by

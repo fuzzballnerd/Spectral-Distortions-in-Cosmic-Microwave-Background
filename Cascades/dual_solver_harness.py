@@ -75,7 +75,7 @@ from cascade import ic_spectrum as ics
 from cascade import solve_burst as sb
 from cascade import cosmology as cosmo
 from cascade import rates
-from recoil_only_solver import evolve_recoil_only
+from cascade.recoil_only_solver import evolve_recoil_only
 
 try:
     from spectroxide import solve as spx_solve
@@ -226,12 +226,25 @@ def run_recoil_only_side(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5,
 # "Kompaneets kernel" side -- needs the real spectroxide Rust binary
 # ----------------------------------------------------------------------
 def run_kompaneets_side(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5,
-                         x_max=35.0, z_end=1.0e3, x_grid=None):
+                         x_max=35.0, z_end=1.0e3, x_grid=None,
+                         pulse_rel_width=3.0e-3, n_sigma_window=15.0,
+                         n_z_table=4000):
     """
     Run the actual spectroxide Kompaneets+DC/BR PDE on the burst-style
     dq_dz/photon_source above, from z_inj (times a small headroom factor,
     so the PDE's z_start is strictly above the injection pulse) down to
     z_end.
+
+    z_min/z_max/n_z are set here to explicitly bracket the burst pulse
+    instead of relying on spx_solve's generic continuous-injection
+    defaults (z_min=1e3, z_max=3e6, n_z=5000) -- those defaults span 3.5
+    decades and, for a pulse only pulse_rel_width*z_inj wide, leave only
+    1-2 tabulated rows anywhere near the pulse (worse for the photon
+    channel, which spectroxide additionally hard-caps at 500 table rows
+    regardless of n_z). With a window of +/-n_sigma_window*width around
+    z_inj instead, the same 500-row photon-channel cap lands ~16-17
+    points/sigma rather than ~0, and the heat channel (no such cap) gets
+    even denser coverage.
 
     Requires spectroxide's Rust binary to be built (see module docstring
     for why that's not possible in this sandbox). Raises RuntimeError with
@@ -258,10 +271,19 @@ def run_kompaneets_side(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5,
 
     z_start = z_inj * 1.2  # headroom above the injection pulse (rel_width=3e-3*z_inj is far narrower)
 
+    # Window the tabulation grid tightly around the pulse (must match
+    # _burst_z_pulse's rel_width) instead of the PDE's generic z_min/z_max
+    # defaults, which don't know where the pulse sits at all.
+    width = pulse_rel_width * z_inj
+    z_lo = max(z_end, z_inj - n_sigma_window * width)
+    z_hi = z_inj + n_sigma_window * width  # comfortably inside z_start = z_inj*1.2
+
     result_heat = spx_solve(method="pde", dq_dz=dq_dz, z_start=z_start, z_end=z_end,
-                             x_max=x_max, debug=True)
+                             x_max=x_max, z_min=z_lo, z_max=z_hi, n_z=n_z_table,
+                             debug=False)
     result_photon = spx_solve(method="pde", photon_source=photon_source, z_start=z_start,
-                               z_end=z_end, x_max=x_max, debug=True)
+                               z_end=z_end, x_max=x_max, z_min=z_lo, z_max=z_hi,
+                               n_z=n_z_table, debug=False)
 
     if not np.allclose(result_heat.x, result_photon.x):
         raise RuntimeError("heat/photon spx_solve() calls returned different x grids.")
@@ -468,7 +490,7 @@ if __name__ == "__main__":
     print()
     print("Building Fig. 10-style dual-solver plot...")
     make_fig10_style_plot("e", E0_LIST, Z_INJ_LIST,
-                           output_path="/mnt/user-data/outputs/dual_solver_fig10_style.png")
+                           output_path="dual_solver_fig10_style.png")
 
     if HAVE_SPECTROXIDE:
         print("\nRunning x_cut sensitivity check (AK19's own x=30/25 cross-check)...")

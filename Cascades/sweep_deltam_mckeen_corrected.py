@@ -39,7 +39,7 @@ from cascade.mckeen_bridge import (
 )
 
 # ── save location ───────────────────────────────────────────────────────────
-SAVE_DIR  = "spectroxide/RUNS"
+SAVE_DIR  = "../spectroxide/RUNS"
 SAVE_FILE = "sweep_deltam_mckeen_corrected_tau1e9"
 save_path = Path(SAVE_DIR)
 save_path.mkdir(parents=True, exist_ok=True)
@@ -320,6 +320,7 @@ if __name__ == "__main__":
 
     ax_top.axhline(0, color='k', lw=0.5, ls=':')
     ax_top.set_xlim(2e-4, 50)
+    ax_top.set_ylim(-2.5e-5, 0.5e-5)
     ax_top.set_xlabel(r'$x = h\nu / kT_z$', fontsize=12)
     ax_top.set_ylabel(r'$T(x)/T_{\rm CMB} - 1$', fontsize=12)
     ax_top.set_title(r'Corrected CMB spectral distortion — $\chi \to n + \gamma$  '
@@ -328,6 +329,7 @@ if __name__ == "__main__":
 
     ax_bot.axhline(0, color='k', lw=0.5, ls=':')
     ax_bot.set_xlim(0.05, 20)
+    ax_bot.set_ylim(-3e-5, 3e-5)
     ax_bot.set_xlabel(r'$x = h\nu / kT_z$', fontsize=12)
     ax_bot.set_ylabel(r'Residual $\Delta n - (\mu M + y Y_{\rm SZ} + a_T G_{\rm bb})$', fontsize=10.5)
     ax_bot.set_title('Residual after subtracting best-fit µ/y/T-shift templates', fontsize=10.5)
@@ -338,6 +340,7 @@ if __name__ == "__main__":
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlim(1e-4, 1e4)
+    ax.set_ylim(1e-33, 1.1e-23)
     xlim = ax.get_xlim()
     pixie_sens = 5e-26
     ax.plot([3e-4, xlim[1]], [pixie_sens, pixie_sens], color='black', lw=1.5, ls=':', alpha=0.5)

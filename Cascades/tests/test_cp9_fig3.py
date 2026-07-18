@@ -10,7 +10,12 @@ energy density by exactly n_e*E0 -- this is not a loose sanity check, it's
 an exact identity the derivation is built to satisfy, so any implementation
 bug that breaks the physics shows up here as a large (not small) violation.
 """
+import os
+import sys
+
 import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fig3_electron_ic_spectrum import (
     electron_ic_delta_i,

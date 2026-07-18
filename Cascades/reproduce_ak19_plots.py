@@ -75,8 +75,8 @@ from cascade import solve_burst as sb
 # Turn this down (e.g. to 40) for faster iteration; turn it up for smoother
 # curves. Each point costs one recursive cascade evaluation -- on this
 # machine, ~0.5 s/point, so 100 points x 2 species ~ 100 s per plot.
-N_HEAT_FRACTION_POINTS = 1000
-N_Y_VS_ENERGY_POINTS = 400
+N_HEAT_FRACTION_POINTS = 100
+N_Y_VS_ENERGY_POINTS = 60
 
 
 def _apply_style():
@@ -233,7 +233,7 @@ def plot_heat_fraction_vs_energy(z=20000.0, fname="fig13_heat_fraction.png"):
 # 3. DIAGNOSTIC -- pair-production cross section near threshold
 # ----------------------------------------------------------------------
 def plot_pair_production_threshold_behavior(fname="diagnostic_pair_production.png"):
-    E_MeV = np.linspace(0.8, 6.0, 2000)
+    E_MeV = np.linspace(0.8, 6.0, 400)
     sigma = rates.pair_production_xsec(E_MeV * 1.0e6, Z=1.0)
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(E_MeV, sigma, "-", color="C2")
@@ -279,7 +279,7 @@ def plot_injection_profile(z_X=2.0e4, tau_X_s=1.0e11, target_y_all_heat=1.5e-5,
                             fname="fig14a_injection_profile.png"):
     f_X = sb.f_X_for_target_all_heat_y(z_X, target_y_all_heat)
     z_lo, z_hi = _find_injection_z_window(z_X, tau_X_s, f_X)
-    z_grid = np.logspace(np.log10(z_lo), np.log10(z_hi), 2000)
+    z_grid = np.logspace(np.log10(z_lo), np.log10(z_hi), 200)
 
     rate = np.array([sb.decay_injection_rate_eV_cm3_s(zp, f_X, tau_X_s) for zp in z_grid])
     dt_dz = 1.0 / ((1.0 + z_grid) * cosmo.H(z_grid))

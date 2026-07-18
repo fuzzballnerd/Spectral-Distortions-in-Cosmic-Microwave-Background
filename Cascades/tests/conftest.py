@@ -9,4 +9,4 @@ import sys
 # covers direct-script and most pytest invocations; this conftest.py is the
 # belt-and-braces fix for the remaining cases (e.g. plain `pytest` run from
 # a directory other than the repo root).
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

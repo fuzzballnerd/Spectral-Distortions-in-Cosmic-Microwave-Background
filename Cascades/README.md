@@ -25,9 +25,9 @@ python3 tests/test_cp9_fig3.py
 python3 tests/test_mckeen_bridge.py
 
 # ── 3. Run the pure-cascade reproduction scripts (no spectroxide needed) ───
-python3 reproduce_ak19_plots.py     # Figs. 1/2/13-style cascade-only plots
-python3 reproduce_fig3.py           # Fig. 3 (electron-only, Eq. A.5/A.6)
-python3 fig3_electron_ic_spectrum.py # Actual Fig. 3
+python3 reproduce_ak19_plots.py       # Figs. 1/2/13-style cascade-only plots
+python3 reproduce_fig3.py             # Fig. 3 (electron-only, Eq. A.5/A.6)
+python3 fig3_electron_ic_spectrum.py  # Actual Fig. 3
 
 # ── 4. Require the spectroxide Rust binary ───────
 python3 fig6_spectrum_via_spectroxide.py
@@ -41,6 +41,27 @@ python3 sweep_deltam_mckeen_corrected.py
 -----------------------------end-----------------------------------------------
 
 NOTE: you have to build spectroxide separately and run the uncommented portions of the code for it to interact with spectroxide.
+
+
+Test breakdown by file (Cascades/tests/) -- pytest-collected counts
+=====================================================================
+(corrected: accounts for parametrized tests, which the earlier
+grep-based "def test_" count missed)
+ 
+test_cp0_cosmology.py             7
+test_cp1_rates.py                 9
+test_cp2_low_energy_cascade.py    4
+test_cp3_high_energy_cascade.py   4
+test_cp4_positron_annihilation.py 4
+test_cp5_redshift_marching.py     4
+test_cp6_convolution.py           4
+test_cp7_interface.py             4
+test_cp8_mpr21.py                 5
+test_cp9_fig3.py                  6
+test_mckeen_bridge.py            48 
+---------------------------------------------------------------------
+TOTAL (all 11 files)              99
+ 
 
 To increase the numerical resolution in all the non-spectroxide plots:
 

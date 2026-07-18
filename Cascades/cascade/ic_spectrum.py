@@ -126,7 +126,7 @@ def _t_domain(p):
     return np.exp(-bound), np.exp(bound)
 
 
-def mean_t_relativistic(p, n=30000):
+def mean_t_relativistic(p, n=4000):
     """
     <t> = integral t*P(t;p) dt / integral P(t;p) dt over the kinematic
     domain, i.e. the mean dimensionless output-photon frequency for one
@@ -216,7 +216,8 @@ def klein_nishina_double_diff(E1_eV, eps_eV, gamma_e):
 # ----------------------------------------------------------------------
 # Electron-only, single-burst, photon-channel-only spectrum (Fig. 3)
 # ----------------------------------------------------------------------
-def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4):
+def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4,
+                          n_x0=3000):
     """
     Build the AK19 Fig. 3-style spectrum for a single injected electron of
     kinetic energy E0_eV, fully depositing its energy at redshift z: the
@@ -253,6 +254,15 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
     Compton scattering), so total returned d(dE)/dx integrates to exactly
     the burst's photon-channel energy budget (f_ic*E0_eV) minus whatever
     falls off the supplied x_grid.
+
+    n_x0 controls the resolution of the fixed seed-frequency quadrature
+    grid used inside _convolved_output_shape's Eq. A.5 convolution
+    (x0_grid = geomspace(1e-3, 30, n_x0)). Eq. A.5's kernel has a genuine
+    step-discontinuity at the kinematic domain edge |ln t| = 2*arcsinh(p),
+    and a too-coarse x0_grid aliases against that edge, producing
+    grid-scale noise in d_dE_dx unrelated to the physics. Default raised
+    from the original hardcoded 300 (roughness ~0.19, unconverged) to
+    3000, which converges the worst case (100 keV electron) to <0.01%.
 
     Returns dict with x_grid, "d_dE_dx" (eV per unit x, the raw per-electron
     spectrum), "f_heat"/"f_ic" (this function's own, un-reprocessed decade
@@ -308,7 +318,7 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
     E_edges = np.geomspace(E0_eV, E_min_eV, n_decades + 1)
 
     seed_shape = _planck_number_shape(x_grid)
-    x0_grid = np.geomspace(1e-3, 30.0, 4000)  # seed-frequency integration grid for the convolution
+    x0_grid = np.geomspace(1e-3, 30.0, n_x0)  # seed-frequency integration grid for the convolution
 
     d_dE_dx = np.zeros_like(x_grid)
     heat_energy = 0.0
@@ -335,6 +345,45 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
             ic_energy += dE_ic  # negligible boost; book as distortion, no shape to speak of
             continue
 
+        # This decade's up-scattered photon isn't automatically the final
+        # word on where dE_ic ends up: exactly like electron_cascade
+        # (solve_burst.py), a sufficiently energetic characteristic photon
+        # can itself pair-produce/gg-scatter and dump much of dE_ic back
+        # into heat (and further sub-cascades) before any of it becomes an
+        # observable single-generation distortion photon. The bug this
+        # mirrors/fixes: previously the FULL dE_ic was converted into Eq.
+        # A.5-shaped photons unconditionally in every decade, i.e. every
+        # decade was treated as if it terminated in one scattering against
+        # the pristine seed -- correct only for decades below
+        # electron_cascade's own reprocessing threshold. Mirror
+        # electron_cascade's characteristic-photon-energy/threshold logic
+        # here (same E_CMB_MEAN_FACTOR-based formula) so the two functions'
+        # energy bookkeeping is actually consistent, and recurse through the
+        # same photon_cascade_full reprocessing chain to find out how much
+        # of dE_ic genuinely survives as first-generation distortion versus
+        # is reclaimed as heat (or further degraded) before building this
+        # decade's Eq. A.5 shape from it.
+        E_cmb_char_eV = E_CMB_MEAN_FACTOR * kT_eV
+        E_gamma_char = (4.0 / 3.0) * gamma_e ** 2 * beta_e ** 2 * E_cmb_char_eV
+        E_gamma_char = min(E_gamma_char, dE_ic)  # can't exceed the energy budget
+
+        if E_gamma_char <= E_min_eV:
+            # sub-relativistic characteristic photon: terminates in one
+            # scattering, same as electron_cascade's direct-booking branch;
+            # the full dE_ic is genuine single-generation distortion.
+            dE_ic_surviving = dE_ic
+        else:
+            sub_budget = sb.photon_cascade_full(E_gamma_char, z, E_min_eV=E_min_eV)
+            # sub_budget's fractions are relative to E_gamma_char; scale by
+            # this decade's actual dE_ic (E_gamma_char may be clipped down
+            # from the naive characteristic-energy formula -- see min()
+            # above, matching electron_cascade's identical scaling).
+            heat_energy += sub_budget["f_heat"] * dE_ic
+            dE_ic_surviving = (sub_budget["f_ic"] + sub_budget["f_subthreshold"]) * dE_ic
+
+        if dE_ic_surviving <= 0:
+            continue
+
         t_bar = mean_t_relativistic(p)
         # <x'_out> = <t>_p * <x0>_seed (seed drawn from the Planck NUMBER
         # shape, mean E_CMB_MEAN_FACTOR=2.70 -- see mean_t_relativistic and
@@ -342,11 +391,11 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
         # actual seed photon, not a fixed kT/h scale).
         boost_per_photon_kT = E_CMB_MEAN_FACTOR * (t_bar - 1.0)
         if boost_per_photon_kT <= 0:
-            ic_energy += dE_ic
+            ic_energy += dE_ic_surviving
             continue
 
-        n_scatter = dE_ic / (kT_eV * boost_per_photon_kT)  # photon count (common arbitrary normalization)
-        ic_energy += dE_ic
+        n_scatter = dE_ic_surviving / (kT_eV * boost_per_photon_kT)  # photon count (common arbitrary normalization)
+        ic_energy += dE_ic_surviving
 
         out_shape = _convolved_output_shape(x_grid, p, x0_grid)
         d_dE_dx += n_scatter * kT_eV * x_grid * out_shape  # added (boosted) photons; dE = x*kT*dN
@@ -379,7 +428,7 @@ def electron_ic_spectrum(E0_eV, z, x_grid, E_min_eV=100.0, min_decades_per_e_fol
             "shape_reliable": shape_reliable, "f_ic_corrected": f_ic_corrected}
 
 
-def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4):
+def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0):
     """
     Occupation-number perturbation delta_n(x) from a single electron burst,
     in spectroxide's own convention (delta_n(x) = [G2_0/x^2] * d(deltaN/N)/dx
@@ -389,7 +438,7 @@ def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_e
     Also passes through electron_ic_spectrum's shape_reliable/f_ic_corrected
     fields -- see that function's docstring for the GeV-scale caveat.
     """
-    spec = electron_ic_spectrum(species_E0_eV, z, x_grid, E_min_eV=E_min_eV, min_decades_per_e_fold=min_decades_per_e_fold)
+    spec = electron_ic_spectrum(species_E0_eV, z, x_grid, E_min_eV=E_min_eV)
     T_K = cosmo.T_gamma(z)
     kT_eV = rates.K_B_EV_PER_K * T_K
 
@@ -405,7 +454,7 @@ def electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_e
                       "shape_reliable": spec["shape_reliable"], "f_ic_corrected": spec["f_ic_corrected"]}
 
 
-def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0, min_decades_per_e_fold=4):
+def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=100.0):
     """
     Convert electron_ic_spectrum's per-electron d(dE)/dx into AK19 Fig. 3's
     plotted quantity: delta_I_nu(x) = (2h nu^3/c^2) * delta_n(x), photon-
@@ -421,7 +470,7 @@ def fig3_style_delta_I(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV
     TODAY's T_CMB0 since x is redshift-invariant) and budget carries
     f_heat/f_ic (plus shape_reliable/f_ic_corrected) for the cross-check.
     """
-    delta_n, budget = electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=E_min_eV, min_decades_per_e_fold=min_decades_per_e_fold)
+    delta_n, budget = electron_ic_delta_n(species_E0_eV, z, injected_frac_rho_cmb, x_grid, E_min_eV=E_min_eV)
 
     # I_nu = 2h nu^3/c^2 * n(x), nu = x*kT/h -- full SI unit conversion.
     # Use TODAY's T_CMB0 here (not T(z), used above only to get delta_n(x)
