@@ -1,0 +1,5 @@
+CURRENT PROBLEMS:
+1. [dual_solver_fig10_style.png] Kompaneets kernel very different from AK19 fig10.
+2. [dual_solver_fig10_style.png] Noise in Recoil only kernel.
+3. [dual_solver_fig10_style.png] Amplitude mismatch in recoil only plot for high e- energies.
+4. Confusion in which parameters to use for cheap and good numerical resolution.

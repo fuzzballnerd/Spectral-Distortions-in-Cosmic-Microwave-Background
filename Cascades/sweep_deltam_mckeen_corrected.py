@@ -39,7 +39,7 @@ from cascade.mckeen_bridge import (
 )
 
 # ── save location ───────────────────────────────────────────────────────────
-SAVE_DIR  = "../Cascade-Runs"
+SAVE_DIR  = "../spectroxide/RUNS"
 SAVE_FILE = "sweep_deltam_mckeen_corrected_tau1e9"
 save_path = Path(SAVE_DIR)
 save_path.mkdir(parents=True, exist_ok=True)
