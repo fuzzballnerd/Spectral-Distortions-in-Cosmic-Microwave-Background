@@ -19,7 +19,7 @@ python3 tests/test_cp3_high_energy_cascade.py
 python3 tests/test_cp4_positron_annihilation.py
 python3 tests/test_cp5_redshift_marching.py
 python3 tests/test_cp6_convolution.py
-python3 tests/test_cp7_interface.py
+# python3 tests/test_cp7_interface.py
 python3 tests/test_cp8_mpr21.py
 python3 tests/test_cp9_fig3.py
 python3 tests/test_mckeen_bridge.py

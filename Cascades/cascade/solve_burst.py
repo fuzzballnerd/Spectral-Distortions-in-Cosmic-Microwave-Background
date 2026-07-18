@@ -174,6 +174,63 @@ def photon_cascade(E0_eV, z, E_min_eV=1000.0, max_scatters=100000):
 E_CMB_MEAN_FACTOR = 2.70  # <h nu> ~ 2.70 kT for a Planck spectrum
 
 
+def _planck_energy_density_samples(n=3, x_lo=0.05, x_hi=20.0, n_grid=4001):
+    """
+    Sample points/weights for the *energy-density*-weighted blackbody
+    spectrum u(x) dx ~ x^3 / (e^x - 1) dx, x = E_cmb / kT.
+
+    This is the correct weighting to use when the quantity being
+    redistributed over seed-photon energy is an energy budget (dE_ic), not a
+    photon count: each seed photon at x is boosted by the *same*
+    (4/3)*gamma^2*beta^2 factor (Thomson limit, energy-independent), so the
+    IC-upscattered photon energy is directly proportional to x, and the
+    fraction of dE_ic carried by seed photons near x is exactly u(x) dx
+    (normalized to integrate to 1).
+
+    Returns (x_samples, weights) with len==n and weights summing to 1.
+    Used to replace the single characteristic-photon-per-decade
+    approximation in `electron_cascade` with a small spread of samples drawn
+    from the actual seed-photon energy distribution (see module notes on
+    the "single-characteristic-IC-photon-per-decade" approximation).
+
+    n is kept small (default 3) since each sample point recursively drives
+    photon_cascade_full/electron_cascade -- this is an average over the
+    real seed spectrum rather than one point, without multiplying the
+    recursion's cost by a large branching factor.
+    """
+    x_grid = np.linspace(x_lo, x_hi, n_grid)
+    u = x_grid ** 3 / np.expm1(x_grid)
+    u /= np.trapezoid(u, x_grid)  # normalize to a pdf in x
+
+    # Equal-probability-mass bins: n samples, each representing 1/n of the
+    # cumulative energy density, sampled at each bin's energy-weighted
+    # centroid. This spreads the samples where the energy density actually
+    # is (concentrated a few kT above the Wien peak, x ~ 3) rather than
+    # uniform-log spacing.
+    cdf = integrate.cumulative_trapezoid(u, x_grid, initial=0.0)
+    cdf /= cdf[-1]
+    edges_p = np.linspace(0.0, 1.0, n + 1)
+    x_edges = np.interp(edges_p, cdf, x_grid)
+
+    x_samples = np.empty(n)
+    weights = np.full(n, 1.0 / n)
+    for i in range(n):
+        lo, hi = x_edges[i], x_edges[i + 1]
+        mask = (x_grid >= lo) & (x_grid <= hi)
+        if mask.sum() < 2:
+            x_samples[i] = 0.5 * (lo + hi)
+            continue
+        xs, us = x_grid[mask], u[mask]
+        # energy-weighted centroid within the bin (weight by x*u since the
+        # boosted photon energy scales with x, i.e. we want the average
+        # *energy*, not the average seed-photon count)
+        x_samples[i] = np.trapezoid(xs * xs * us, xs) / np.trapezoid(xs * us, xs)
+    return x_samples, weights
+
+
+_IC_SAMPLE_X, _IC_SAMPLE_W = _planck_energy_density_samples(n=3)
+
+
 def _pair_production_total_rate(E_gamma_eV, z):
     """
     Total Bethe-Heitler pair-production rate (s^-1) for a photon of energy
@@ -217,9 +274,12 @@ def electron_cascade(E0_eV, z, E_min_eV=1000.0, depth=0, max_depth=60):
 
     The electron's cooling track (E0 -> E_min) is stepped in log-decades;
     within each decade the local Coulomb/IC branching ratio (same formulas as
-    electron_heat_fraction) splits that decade's energy loss into heat vs. a
-    representative IC photon of characteristic energy
-    (4/3) gamma^2 beta^2 * <E_CMB>, which is fed back into photon_cascade_full.
+    electron_heat_fraction) splits that decade's energy loss into heat vs.
+    IC photons of energy (4/3) gamma^2 beta^2 * E_cmb, spread-sampled over
+    the actual (energy-density-weighted) Planck seed-photon distribution
+    -- not collapsed to one characteristic point -- and each sample is fed
+    back into photon_cascade_full and averaged (see
+    `_planck_energy_density_samples`).
 
     Returns {"f_heat", "f_ic", "f_subthreshold"} fractions of E0_eV.
     """
@@ -231,7 +291,6 @@ def electron_cascade(E0_eV, z, E_min_eV=1000.0, depth=0, max_depth=60):
     U_CMB_J_m3 = cosmo.A_RAD * T_K ** 4
     U_CMB_eV_cm3 = U_CMB_J_m3 * 6.241509074e18 / 1.0e6
     E_e_bg_eV = 1.5 * rates.K_B_EV_PER_K * T_K
-    E_cmb_char_eV = E_CMB_MEAN_FACTOR * rates.K_B_EV_PER_K * T_K
 
     n_decades = max(4, int(np.ceil(np.log10(E0_eV / E_min_eV) * 4)))
     E_edges = np.geomspace(E0_eV, E_min_eV, n_decades + 1)
@@ -253,22 +312,37 @@ def electron_cascade(E0_eV, z, E_min_eV=1000.0, depth=0, max_depth=60):
 
         gamma_e = 1.0 + E_mid / M_E_EV
         beta2 = 1.0 - 1.0 / gamma_e ** 2
-        E_gamma_char = (4.0 / 3.0) * gamma_e ** 2 * beta2 * E_cmb_char_eV
-        E_gamma_char = min(E_gamma_char, dE_ic)  # can't exceed the energy budget
+        boost = (4.0 / 3.0) * gamma_e ** 2 * beta2
+        kT_eV = rates.K_B_EV_PER_K * T_K
 
-        if E_gamma_char <= E_min_eV:
-            # sub-relativistic IC photon, well below any pair/gg threshold --
-            # book directly as distortion (equivalent to CP2's treatment)
-            ic_energy += dE_ic
-        else:
-            sub_budget = photon_cascade_full(E_gamma_char, z, E_min_eV=E_min_eV,
-                                              depth=depth + 1, max_depth=max_depth)
-            # sub_budget's fractions are relative to E_gamma_char; scale by
-            # the actual energy budget dE_ic being represented by this
-            # characteristic photon (dE_ic may differ from E_gamma_char,
-            # since E_gamma_char is clipped -- see the min() above).
-            heat_energy += sub_budget["f_heat"] * dE_ic
-            ic_energy += (sub_budget["f_ic"] + sub_budget["f_subthreshold"]) * dE_ic
+        # Instead of collapsing this decade's IC output to one characteristic
+        # photon energy, spread-sample it over the actual (energy-density
+        # weighted) seed-photon distribution off the Planck spectrum and
+        # average the recursive results, weighted by each sample's share of
+        # dE_ic. Each seed photon at x=E_cmb/kT is boosted by the same
+        # energy-independent Thomson factor `boost`, so this is exactly the
+        # IC-upscattered photon energy distribution for this decade (see
+        # `_planck_energy_density_samples`). This smooths the boost/de-boost
+        # oscillation that a single point can't average over (AK19 Sec 4,
+        # Fig 13 discussion), fixing the single-characteristic-IC-photon
+        # approximation flagged for this module.
+        f_heat_sub = 0.0
+        f_rest_sub = 0.0
+        for x_i, w_i in zip(_IC_SAMPLE_X, _IC_SAMPLE_W):
+            E_gamma_i = boost * kT_eV * x_i
+            E_gamma_i = min(E_gamma_i, dE_ic)  # can't exceed the energy budget
+            if E_gamma_i <= E_min_eV:
+                # sub-relativistic IC photon, well below any pair/gg
+                # threshold -- book directly as distortion (CP2 treatment)
+                f_rest_sub += w_i
+            else:
+                sub_budget = photon_cascade_full(E_gamma_i, z, E_min_eV=E_min_eV,
+                                                  depth=depth + 1, max_depth=max_depth)
+                f_heat_sub += w_i * sub_budget["f_heat"]
+                f_rest_sub += w_i * (sub_budget["f_ic"] + sub_budget["f_subthreshold"])
+
+        heat_energy += f_heat_sub * dE_ic
+        ic_energy += f_rest_sub * dE_ic
 
     # The loop above only accounts for energy lost while cooling from E0_eV
     # down to E_min_eV, i.e. sum(dE) = E0_eV - E_min_eV. The leftover
