@@ -75,6 +75,7 @@ from cascade import ic_spectrum as ics
 from cascade import solve_burst as sb
 from cascade import cosmology as cosmo
 from cascade import rates
+from recoil_only_solver import evolve_recoil_only
 
 try:
     from spectroxide import solve as spx_solve
@@ -176,18 +177,49 @@ def make_burst_photon_source(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5
 # ----------------------------------------------------------------------
 # "Recoil-only" side -- runnable standalone, no Rust needed
 # ----------------------------------------------------------------------
-def run_recoil_only_side(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5, x_grid=None):
+def run_recoil_only_side(species, E0_eV, z_inj, injected_frac_rho_cmb=1.0e-5,
+                          x_grid=None, z_end=1.0e3):
     """
-    The Recoil-only curve: cascade/ic_spectrum.py's raw (pre-relaxation)
-    electron IC spectrum, exactly as reproduce_fig3.py computes it (fix
-    #6) -- "the cascade-style approximate treatment... run standalone
-    across the full spectrum" per cascade_corrections_all_figures.md's own
-    description of what Recoil-only-standalone means.
+    The Recoil-only curve, AK19's actual definition: the injection-instant
+    electron IC spectrum (cascade/ic_spectrum.py's electron_ic_delta_n,
+    fix #6), THEN evolved from z_inj down to z_end under pure Eq. 3.3
+    recoil advection (recoil_only_solver.py's evolve_recoil_only, already
+    validated in test_cp10_recoil_only.py: conserves photon number,
+    correct v(x) sign structure, drifts bumps toward the x=4 fixed point).
+
+    BUG FIX: this function previously returned ics.fig3_style_delta_I(...)
+    directly -- the pre-relaxation, single-generation spectrum with NO
+    z-evolution at all. That's Fig. 3's quantity, not Fig. 10's "Recoil-only"
+    curve, and it's why the z_inj-dependence of the resulting plot came
+    only from the weak z-dependence of the f_heat/f_ic energy-budget split
+    (via electron_ic_delta_n's own z argument) rather than from any actual
+    advection over time. At 100 keV, where f_ic is already close to
+    saturated (~0.93-0.97) across the whole z_inj range, that leftover
+    budget-only z-dependence is tiny, so the four z_inj curves nearly
+    overlapped instead of showing AK19's documented "sharper and taller
+    with increasing z_inj" trend -- which is a genuine z-evolution effect,
+    not a budget effect, and was simply missing.
     """
     if x_grid is None:
         x_grid = np.linspace(X_MIN_DEFAULT, X_MAX_DEFAULT, N_X_DEFAULT)
-    delta_I, budget = ics.fig3_style_delta_I(E0_eV, z_inj, injected_frac_rho_cmb, x_grid)
-    return {"x": x_grid, "delta_I": delta_I, "budget": budget}
+
+    delta_n_seed, budget = ics.electron_ic_delta_n(E0_eV, z_inj, injected_frac_rho_cmb, x_grid)
+    delta_n_final = evolve_recoil_only(delta_n_seed, x_grid, z_start=z_inj, z_end=z_end)
+
+    # Same delta_n(x) -> delta_I(x) conversion ics.fig3_style_delta_I uses
+    # (2*h*nu^3/c^2 * delta_n, evaluated with TODAY's T_CMB0 since x is
+    # redshift-invariant) -- reused here rather than re-derived so both the
+    # un-evolved (Fig. 3) and evolved (Fig. 10) spectra share one unit
+    # convention.
+    EV_TO_J = 1.602176634e-19
+    H_PLANCK_SI = 6.62607015e-34
+    C_LIGHT_SI = 2.99792458e8
+    kT0_eV = rates.K_B_EV_PER_K * cosmo.T_CMB0
+    kT0_J = kT0_eV * EV_TO_J
+    delta_I = 2.0 * kT0_J ** 3 * x_grid ** 3 * delta_n_final / (H_PLANCK_SI ** 2 * C_LIGHT_SI ** 2)
+
+    return {"x": x_grid, "delta_I": delta_I, "delta_n": delta_n_final,
+            "delta_n_seed": delta_n_seed, "budget": budget, "z_inj": z_inj, "z_end": z_end}
 
 
 # ----------------------------------------------------------------------

@@ -22,6 +22,7 @@ python3 tests/test_cp6_convolution.py
 python3 tests/test_cp7_interface.py
 python3 tests/test_cp8_mpr21.py
 python3 tests/test_cp9_fig3.py
+python3 tests/test_mckeen_bridge.py
 
 # ── 3. Run the pure-cascade reproduction scripts (no spectroxide needed) ───
 python3 reproduce_ak19_plots.py     # Figs. 1/2/13-style cascade-only plots
@@ -33,6 +34,7 @@ python3 fig6_spectrum_via_spectroxide.py
 python3 dual_solver_harness.py
 python3 fig6_single_spectrum.py
 python3 fig6_combine_points.py
+python3 sweep_deltam_mckeen_corrected.py
 # These will fail/degrade gracefully with a clear "spectroxide not available"
 # error rather than crash silently — that's expected without the Rust build.
 
