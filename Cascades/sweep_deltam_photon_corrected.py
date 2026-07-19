@@ -40,7 +40,7 @@ from cascade.mckeen_bridge import (
 
 # ── save location ───────────────────────────────────────────────────────────
 SAVE_DIR  = "../spectroxide/RUNS"
-SAVE_FILE = "sweep_deltam_mckeen_corrected_tau1e9"
+SAVE_FILE = "sweep_deltam_photon_corrected_tau1e9"
 save_path = Path(SAVE_DIR)
 save_path.mkdir(parents=True, exist_ok=True)
 npz_file  = save_path / f"{SAVE_FILE}.npz"
@@ -156,19 +156,24 @@ def run_one(dm_eV, force_all_heat=False):
         force_f_heat=1.0 if force_all_heat else None,
     )
 
+    z_heat_grid = np.geomspace(Z_END, Z_START, 400)          # log-spaced, matches PDE's own z range
+    heat_rate   = np.array([dq_dz(z) for z in z_heat_grid])  # d(Δρ/ρ)/dz at each z
+
     r_heat = spectroxide.solve(
         method="pde", dq_dz=dq_dz, cosmo=COSMO_AK19,
         z_start=Z_START, z_end=Z_END,
         z_min=Z_MIN, z_max=Z_MAX, n_z=N_Z,
         x_min=X_MIN, x_max=X_MAX, n_x=N_X,
         timeout=TIMEOUT_S,
+        dtau_max=5.0,
     )
 
     if force_all_heat:
         # Sec 8 item 3: skip the photon solve() call entirely -- 100% of
         # omega_inj is being forced into heat, so there is nothing left
         # for the photon channel to carry.
-        return dm_eV, (r_heat.x, r_heat.delta_n, r_heat.mu, r_heat.y, Tn_eV)
+        return dm_eV, (r_heat.x, r_heat.delta_n, r_heat.mu, r_heat.y, Tn_eV,
+                        z_heat_grid, heat_rate)
 
     photon_source = make_mckeen_photon_source(omega_inj_eV, GAMMA_X, den_fac, x_max_factor=X_MAX, x_min=X_MIN)
 
@@ -178,6 +183,7 @@ def run_one(dm_eV, force_all_heat=False):
         z_min=Z_MIN, z_max=Z_MAX, n_z=N_Z,
         x_min=X_MIN, x_max=X_MAX, n_x=N_X,
         timeout=TIMEOUT_S,
+        dtau_max=5.0,
     )
 
     # Both calls share x_min/x_max/n_x explicitly (not just relying on
@@ -194,7 +200,7 @@ def run_one(dm_eV, force_all_heat=False):
     mu = r_heat.mu + r_phot.mu
     y  = r_heat.y  + r_phot.y
 
-    return dm_eV, (r_heat.x, delta_n, mu, y, Tn_eV)
+    return dm_eV, (r_heat.x, delta_n, mu, y, Tn_eV, z_heat_grid, heat_rate)
 
 
 # ── analytic templates (occupation-number convention), unchanged from the
@@ -245,12 +251,14 @@ if npz_file.exists():
 def save_results():
     flat = {"tau_X": np.array(tau_X), "den_fac": np.array(den_fac),
             "delta_m_ev": DELTA_M_EV}
-    for dm, (x_arr, dn, mu_r, y_r, Tn_r) in results.items():
-        flat[f"dm{dm:.6g}_x"]       = x_arr
-        flat[f"dm{dm:.6g}_delta_n"] = dn
-        flat[f"dm{dm:.6g}_mu"]      = np.array(mu_r)
-        flat[f"dm{dm:.6g}_y"]       = np.array(y_r)
-        flat[f"dm{dm:.6g}_Tn"]      = np.array(Tn_r)
+    for dm, (x_arr, dn, mu_r, y_r, Tn_r, z_heat, heat_rate) in results.items():
+        flat[f"dm{dm:.6g}_x"]         = x_arr
+        flat[f"dm{dm:.6g}_delta_n"]   = dn
+        flat[f"dm{dm:.6g}_mu"]        = np.array(mu_r)
+        flat[f"dm{dm:.6g}_y"]         = np.array(y_r)
+        flat[f"dm{dm:.6g}_Tn"]        = np.array(Tn_r)
+        flat[f"dm{dm:.6g}_z_heat"]    = z_heat
+        flat[f"dm{dm:.6g}_heat_rate"] = heat_rate
     np.savez(npz_file, **flat)
     print(f"  → saved to '{npz_file}'")
 
