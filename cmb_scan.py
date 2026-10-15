@@ -73,6 +73,19 @@ def run_heat_point(beta, dm_MeV, logtau):
         timeout=TIMEOUT_S, dtau_max=DTAU_MAX)
     return dict(mu=float(r.mu), y=float(r.y), status="ok")
 
+def preflight_cascade(dm_MeV):
+    """The bridge's dq_dz / photon_source closures swallow *every* exception and return 0.0, so a broken
+    cascade module silently yields mu = y = 0.  Call the underlying pieces directly (no try/except) so the
+    real error is raised here, once, before any hours of compute."""
+    from Cascades.cascade import mckeen_bridge as mb
+    omega_inj_eV, _ = omega_inj_and_Tn_eV(dm_MeV*1e6)
+    if not validate_omega_inj_for_high_energy(omega_inj_eV):
+        return
+    mb._cached_budget("gamma", omega_inj_eV, 1.0e5, high_energy=True)          # raises the real error if broken
+    v = make_mckeen_dq_dz(omega_inj_eV, 1e-10, DEN_FAC, x_max_factor=X_MAX)(1.0e5)
+    if not (np.isfinite(v) and v != 0.0):
+        raise RuntimeError(f"cascade dq_dz(z=1e5) returned {v!r} for dm={dm_MeV:g} (bridge is failing silently)")
+
 def run_cascade_point(dm_MeV, logtau):
     dm_eV, gamma_x = dm_MeV*1e6, 10.0**(-logtau)
     omega_inj_eV, _ = omega_inj_and_Tn_eV(dm_eV)
@@ -86,7 +99,10 @@ def run_cascade_point(dm_MeV, logtau):
     r_p = spectroxide.solve(photon_source=src, **kw)
     if not np.allclose(r_h.x, r_p.x):
         raise RuntimeError("heat/photon x grids differ")
-    return dict(mu=float(r_h.mu + r_p.mu), y=float(r_h.y + r_p.y), status="ok")
+    mu, y = float(r_h.mu + r_p.mu), float(r_h.y + r_p.y)
+    if not (math.isfinite(mu) and math.isfinite(y)) or (mu == 0.0 and y == 0.0):
+        raise RuntimeError(f"cascade point gave mu={mu}, y={y} (zero/non-finite => bridge failed silently)")
+    return dict(mu=mu, y=y, status="ok")
 
 def run_point(family, dm, logtau):
     if family == "cascade":
@@ -165,6 +181,11 @@ def main():
           f"{min(args.workers, max(len(todo),1))} workers -> {out}", flush=True)
     if not todo:
         return
+
+    if "cascade" in {f for f, _, _ in todo}:
+        for dm in sorted({d for f, d, _ in todo if f == "cascade"}):
+            preflight_cascade(dm)                 # aborts with the real traceback if the cascade module is broken
+        print(f"[{args.name}] cascade pre-flight OK", flush=True)
 
     writer = ShardWriter(out)
     fail_log = shard_dir / f"failed_{args.name}.log"
