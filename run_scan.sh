@@ -1,40 +1,30 @@
 #!/usr/bin/env bash
-# Launch cmb_scan.py detached in tmux, shown to observers as "batman".
+# Launch cmb_scan.py inside a detached tmux session so it survives disconnects.
 #
-# Usage:   bash run_scan.sh 0.5 1 3 6          # Delta_m values for this machine
-# Env:     SESSION=batman   EXTRA="--workers 8"
+# Usage:   bash run_scan.sh 0.5 1 3 6          # the Delta_m values for this machine
+# Env:     SESSION=cmb  (tmux session name)   EXTRA="--workers 8"  (extra cmb_scan.py args)
 #
-# Re-attach:  tmux attach -t batman     Detach: Ctrl+b then d
+# Re-attach:  tmux attach -t cmb      Detach: Ctrl+b then d      Stop: Ctrl+c inside the session
 # Resuming is automatic: re-running the same command skips points already on disk.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION="${SESSION:-batman}"
+SESSION="${SESSION:-cmb}"
 EXTRA="${EXTRA:-}"
 
-[ $# -ge 1 ] || { echo "Usage: bash run_scan.sh <dm values...>"; exit 1; }
+[ $# -ge 1 ] || { echo "Usage: bash run_scan.sh <dm values...>   e.g. bash run_scan.sh 0.5 1 3 6"; exit 1; }
 command -v tmux >/dev/null || { echo "tmux not installed; run setup.sh first."; exit 1; }
 [ -f "$HERE/.venv/bin/activate" ] || { echo "No .venv found; run setup.sh first."; exit 1; }
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "tmux session '$SESSION' already exists. Attach with: tmux attach -t $SESSION"
+  echo "tmux session '$SESSION' already exists (scan probably running). Attach with: tmux attach -t $SESSION"
   exit 1
 fi
 
-# The script is run through a symlink so `ps`/`top` show "batman.py", not "cmb_scan.py".
-ln -sf "$HERE/cmb_scan.py" "$HERE/batman.py"
+CMD="cd '$HERE' && source .venv/bin/activate && [ -f \"\$HOME/.cargo/env\" ] && source \"\$HOME/.cargo/env\"; \
+python cmb_scan.py --dm $* $EXTRA 2>&1 | tee -a scan_${SESSION}.log; \
+echo; echo '[scan process ended - press Enter to close]'; read"
 
-# Inner runner (its name and contents are what the tmux pane's command line shows).
-RUNNER="$HERE/.batman_run.sh"
-cat > "$RUNNER" <<INNER
-#!/usr/bin/env bash
-cd "$HERE"
-source .venv/bin/activate
-[ -f "\$HOME/.cargo/env" ] && source "\$HOME/.cargo/env"
-python batman.py --dm "\$@" $EXTRA 2>&1 | tee -a batman.log
-echo; echo "[ended - press Enter to close]"; read
-INNER
-
-tmux new-session -d -s "$SESSION" -n "$SESSION" "bash '$RUNNER' $*"
-echo "Started tmux session '$SESSION' (log: $HERE/batman.log)"
+tmux new-session -d -s "$SESSION" "bash -lc \"$CMD\""
+echo "Started tmux session '$SESSION' (log: $HERE/scan_${SESSION}.log)"
 echo "Attach:  tmux attach -t $SESSION"
