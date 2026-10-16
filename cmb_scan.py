@@ -69,7 +69,7 @@ def run_heat_point(beta, dm_MeV, logtau):
     r = solve_heat(
         injection={'type': 'decaying_particle', 'f_x': F_X, 'gamma_x': 10.0**(-logtau)},
         z_start=Z_START, z_end=Z_END, x_min=X_MIN, x_max=X_MAX, n_x=N_X,
-        method='pde', production_grid=True, number_conserving=True,
+        method='pde', production_grid=False, number_conserving=True,
         timeout=TIMEOUT_S, dtau_max=DTAU_MAX)
     return dict(mu=float(r.mu), y=float(r.y), status="ok")
 
