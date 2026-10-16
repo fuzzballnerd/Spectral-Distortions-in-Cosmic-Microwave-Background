@@ -73,7 +73,11 @@ TAG = hashlib.md5(json.dumps(SETTINGS, sort_keys=True).encode()).hexdigest()[:8]
 # its energy was lost.  The photon table gets its own grid: log below 25, fine linear spacing (~0.025, matching the
 # PDE grid) from 25 to 40 so the narrow Gaussian is resolved.
 X_CUT = 35.0
-X_TABLE = np.unique(np.r_[np.logspace(np.log10(X_MIN), np.log10(25.0), 500), np.linspace(25.0, 40.0, 600)])
+_xt = np.r_[np.logspace(np.log10(X_MIN), np.log10(25.0), 500, endpoint=False), np.linspace(25.0, 40.0, 600)]
+# spectroxide's CSV writer prints each x with 10 significant digits and Rust requires a strictly ascending grid,
+# so de-duplicate *after* rounding to that precision (np.unique on raw floats left 25.0 twice).
+X_TABLE = np.array(sorted({float(f"{v:.10e}") for v in _xt}))
+assert np.all(np.diff(X_TABLE) > 0)
 CASCADE_SETTINGS = dict(version=2, x_cut=X_CUT, x_table=(float(X_TABLE[0]), float(X_TABLE[-1]), int(len(X_TABLE))))
 M_E_EV, E_CMB_MEAN_FACTOR = 0.51099895e6, 2.701     # only used to record where the line is placed
 
