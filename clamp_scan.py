@@ -42,14 +42,14 @@ with ThreadPoolExecutor(max_workers=min(a.workers, len(todo))) as ex:
         try:
             p = fut.result()
             row = (f, dm, lt, p.get("rho_e_clamps", 0), p.get("newton_fail", 0), p["mu"], p["y"],
-                   ",".join(p.get("flags", [])) or "-", p.get("wall_s"))
+                   ",".join(p.get("flags", [])) or "-", p.get("wall_s"), p.get("z_decay"))
         except Exception as e:
-            row = (f, dm, lt, None, None, float("nan"), float("nan"), f"FAILED {e!r}"[:60], None)
+            row = (f, dm, lt, None, None, float("nan"), float("nan"), f"FAILED {e!r}"[:60], None, None)
         rows.append(row)
         print(f"  done {len(rows)}/{len(todo)}: {f} dm={dm:g} lt={lt:g}  clamps={row[3]} newton_fail={row[4]}  "
               f"({(time.time()-t0)/60:.1f} min)", flush=True)
 
-print("\nfamily    dm     lt   clamps  newton    mu/den      y/den     wall_s  flags")
-for f, dm, lt, cl, nf, mu, y, fl, w in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
-    print(f"{f:8s} {dm:5g} {lt:6.2f} {str(cl):>7s} {str(nf):>7s} {mu/c.DEN_FAC:10.3e} {y/c.DEN_FAC:10.3e} "
+print("\nfamily    dm     lt    z_dec  clamps  newton    mu/den      y/den     wall_s  flags")
+for f, dm, lt, cl, nf, mu, y, fl, w, zd in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
+    print(f"{f:8s} {dm:5g} {lt:6.2f} {zd if zd is None else format(zd,'.3g'):>8} {str(cl):>7s} {str(nf):>7s} {mu/c.DEN_FAC:10.3e} {y/c.DEN_FAC:10.3e} "
           f"{str(w):>8s}  {fl}")

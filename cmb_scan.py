@@ -22,7 +22,7 @@ cascade points made with another x_cut are recomputed automatically, beta points
 
 Logging / flags (added):
   * every stored point has `flagged` (bool) and `flags` (list) -- e.g. rho_e_clamped, newton_not_converged,
-    solver_warning, photon_line_beyond_pde_grid, photon_source_zero.  Flagged points are still stored
+    solver_warning, photon_line_beyond_pde_grid, photon_source_zero, decay_outside_pde_window.  Flagged points are still stored
     (status stays "ok"); filter on `flagged` / `flags` when merging.
   * warnings_<name>.log : one line per flagged point;  failed_<name>.log : message + traceback per failed point.
   * cascade points also store mu_heat/y_heat/mu_phot/y_phot, grid sizes, and where the photon line sits.
@@ -91,6 +91,22 @@ def line_position(omega_inj_eV, x_cut=X_CUT):
         return raw, max(raw, 1.0)
     u = math.log(raw / anchor)
     return raw, anchor + (x_cut - anchor) * u / (1.0 + u)
+
+# ── decay redshift: z at which t(z) = tau (matter + radiation + Lambda, cosmology = COSMO_AK19) ──────
+def _build_t_of_z():
+    h, Om = COSMO_AK19["h"], COSMO_AK19["omega_m"]
+    Or = (1 + 0.2271*COSMO_AK19["n_eff"]) * 2.473e-5 * (COSMO_AK19["t_cmb"]/2.7255)**4 / h**2
+    OL = 1.0 - Om - Or
+    H0 = 100.0*h*1e5/3.0857e24
+    u = np.linspace(math.log(2.0), math.log(1e10 + 1.0), 20001)        # u = ln(1+z), z from 1 to 1e10
+    a = np.exp(u); f = 1.0 / (H0*np.sqrt(Or*a**4 + Om*a**3 + OL))
+    seg = 0.5*(f[1:] + f[:-1]) * np.diff(u)
+    return u, np.concatenate([np.cumsum(seg[::-1])[::-1], [0.0]])      # t(z) = int_z^inf dz'/((1+z')H)
+_U_T, _T_Z = _build_t_of_z()
+
+def z_at_time(t_s):
+    """Redshift at cosmic time t_s (seconds)."""
+    return float(math.exp(np.interp(-t_s, -_T_Z, _U_T)) - 1.0)
 
 def pkey(family, dm, logtau):
     return f"{family}|dm={dm:.6g}|lt={logtau:.3f}"
@@ -219,7 +235,7 @@ def run_cascade_point(dm_MeV, logtau):
 
     x_raw, x_eff = line_position(omega_inj_eV)
     z_decay = math.sqrt(2.39e19 * gamma_x)   # rough z at t = tau (radiation era)
-    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9 * X_CUT), z_decay=z_decay)
+    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9 * X_CUT))
     return dict(mu=mu, y=y, status="ok", x_cut=X_CUT, cascade_version=CASCADE_SETTINGS["version"], _flags=flags,
                 mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 grid_h=len(r_h.x), grid_p=len(r_p.x), grid_ok=grid_ok, **extra)
@@ -244,6 +260,11 @@ def run_point_logged(family, dm, logtau):
     finally:
         _tls.buf = None
     flags = list(point.pop("_flags", []))
+    if point.get("status") == "ok":
+        z_dec = z_at_time(10.0**logtau)
+        point["z_decay"] = z_dec
+        if z_dec > Z_START or z_dec < Z_END:      # most of the decay happens before z_start / after z_end: result is truncated
+            flags.append("decay_outside_pde_window")
     wflags, info = classify_warnings(msgs)
     flags = wflags + flags
     point.update(info)
