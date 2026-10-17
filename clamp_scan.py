@@ -24,6 +24,8 @@ ap.add_argument("--dtau-max", type=float, default=c.DTAU_MAX)
 ap.add_argument("--den-fac", type=float, default=c.DEN_FAC)
 ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--rho-e-cap", type=float, default=None, help="needs the patched binary (patch_rho_cap.py)")
+ap.add_argument("--floor-mu", type=float, default=-2.291e-9, help="zero-injection floor (dtau_max=5 value); subtracted once per solve")
+ap.add_argument("--floor-y", type=float, default=-9.228e-10, help="zero-injection floor (dtau_max=5 value); subtracted once per solve")
 a = ap.parse_args()
 
 import os
@@ -53,7 +55,10 @@ with ThreadPoolExecutor(max_workers=min(a.workers, len(todo))) as ex:
         print(f"  done {len(rows)}/{len(todo)}: {f} dm={dm:g} lt={lt:g}  clamps={row[3]} newton_fail={row[4]}  "
               f"({(time.time()-t0)/60:.1f} min)", flush=True)
 
-print("\nfamily    dm     lt    z_dec  clamps  newton    mu/den      y/den     wall_s  flags")
+print("\nfamily    dm     lt    z_dec  clamps  newton    mu/den      y/den  mu_sig/den  y_sig/den  wall_s  flags")
+print("(mu_sig/den, y_sig/den = (raw - floor)/den, with the floor counted once per solve: 1 for beta*, 2 for cascade)")
 for f, dm, lt, cl, nf, mu, y, fl, w, zd in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
-    print(f"{f:8s} {dm:5g} {lt:6.2f} {zd if zd is None else format(zd,'.3g'):>8} {str(cl):>7s} {str(nf):>7s} {mu/c.DEN_FAC:10.3e} {y/c.DEN_FAC:10.3e} "
-          f"{str(w):>8s}  {fl}")
+    nfl = 2 if f == "cascade" else 1
+    ms, ys = (mu - nfl*a.floor_mu)/c.DEN_FAC, (y - nfl*a.floor_y)/c.DEN_FAC
+    print(f"{f:8s} {dm:5g} {lt:6.2f} {zd if zd is None else format(zd,'.3g'):>8} {str(cl):>7s} {str(nf):>7s} "
+          f"{mu/c.DEN_FAC:10.3e} {y/c.DEN_FAC:10.3e} {ms:10.3e} {ys:10.3e} {str(w):>8s}  {fl}")
