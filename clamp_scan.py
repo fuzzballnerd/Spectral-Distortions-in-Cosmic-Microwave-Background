@@ -23,15 +23,19 @@ ap.add_argument("--logtau", type=float, nargs="+", default=[5.5, 6.5, 7.5, 8.5, 
 ap.add_argument("--dtau-max", type=float, default=c.DTAU_MAX)
 ap.add_argument("--den-fac", type=float, default=c.DEN_FAC)
 ap.add_argument("--workers", type=int, default=4)
+ap.add_argument("--rho-e-cap", type=float, default=None, help="needs the patched binary (patch_rho_cap.py)")
 a = ap.parse_args()
 
+import os
+if a.rho_e_cap:
+    os.environ["SPECTROXIDE_RHO_E_CAP"] = repr(float(a.rho_e_cap))
 c.DTAU_MAX, c.DEN_FAC = a.dtau_max, a.den_fac            # cmb_scan's runners read these module globals
 warnings.simplefilter("always")
 warnings.showwarning = c._showwarning                    # per-thread capture, as in the scan
 
 todo = [(f, dm, lt) for f in a.families for dm in a.dm for lt in a.logtau]
 print(f"{len(todo)} points, {min(a.workers, len(todo))} workers, dtau_max={c.DTAU_MAX:g}, den_fac={c.DEN_FAC:g}, "
-      f"x_cut={c.X_CUT:g}", flush=True)
+      f"x_cut={c.X_CUT:g}, rho_e_cap={os.environ.get('SPECTROXIDE_RHO_E_CAP', 'default')}", flush=True)
 
 rows = []
 t0 = time.time()

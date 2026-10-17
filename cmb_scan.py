@@ -268,7 +268,8 @@ def run_point_logged(family, dm, logtau):
     wflags, info = classify_warnings(msgs)
     flags = wflags + flags
     point.update(info)
-    point.update(flagged=bool(flags), flags=flags, wall_s=round(time.time() - t0, 1))
+    point.update(flagged=bool(flags), flags=flags, wall_s=round(time.time() - t0, 1),
+                 rho_e_cap=os.environ.get("SPECTROXIDE_RHO_E_CAP"))
     return point
 
 # ── crash-safe storage: one JSON line per finished point, fsync'ed ─────────
@@ -287,6 +288,9 @@ def load_done(shard_dir):
                     if rec["key"].startswith("cascade|") and p.get("status") == "ok" \
                             and p.get("x_cut") != X_CUT:
                         continue                  # computed with a different line placement: redo it
+                    cap = os.environ.get("SPECTROXIDE_RHO_E_CAP")
+                    if cap and "rho_e_clamped" in (p.get("flags") or []) and p.get("rho_e_cap") != cap:
+                        continue                  # was clamped under another cap: redo with the raised one
                     done[rec["key"]] = p
     return done
 
@@ -329,8 +333,13 @@ def main():
     ap.add_argument("--workers", type=int, default=os.cpu_count(), help="parallel PDE solves (default: all cores)")
     ap.add_argument("--shard-dir", default="Parameter-Space-data/shards")
     ap.add_argument("--name", default=socket.gethostname(), help="label used in the output file name")
+    ap.add_argument("--rho-e-cap", type=float, default=None,
+                    help="raise spectroxide's rho_e caps (needs the patched binary, see patch_rho_cap.py); "
+                         "sets SPECTROXIDE_RHO_E_CAP for every solve")
     ap.add_argument("--list", action="store_true", help="print the grid and exit")
     args = ap.parse_args()
+    if args.rho_e_cap:
+        os.environ["SPECTROXIDE_RHO_E_CAP"] = repr(float(args.rho_e_cap))   # inherited by the Rust subprocesses
 
     n_per_dm = len(args.families) * len(LOGTAU_GRID)
     if args.list or not args.dm:
