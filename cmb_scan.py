@@ -22,7 +22,7 @@ cascade points made with another x_cut are recomputed automatically, beta points
 
 Logging / flags (added):
   * every stored point has `flagged` (bool) and `flags` (list) -- e.g. rho_e_clamped, newton_not_converged,
-    solver_warning, photon_line_beyond_pde_grid, photon_source_zero, decay_outside_pde_window.  Flagged points are still stored
+    solver_warning, photon_line_beyond_pde_grid, photon_source_zero, decay_before_pde_start (decay_after_pde_end is stored as a note, not a flag).  Flagged points are still stored
     (status stays "ok"); filter on `flagged` / `flags` when merging.
   * warnings_<name>.log : one line per flagged point;  failed_<name>.log : message + traceback per failed point.
   * cascade points also store mu_heat/y_heat/mu_phot/y_phot, grid sizes, and where the photon line sits.
@@ -161,7 +161,7 @@ _CLAMP_RE  = re.compile(r"clamped (\d+) times")
 
 def classify_warnings(msgs):
     """Turn raw solver warnings into (flags, info).  'Progress:' lines are ignored."""
-    flags, info, other = [], dict(rho_e_clamps=0, newton_fail=0), []
+    flags, info, other, newton = [], dict(rho_e_clamps=0, newton_fail=0), [], []
     seen = set()
     for m in msgs:
         if "Progress:" in m or m in seen:
@@ -172,6 +172,7 @@ def classify_warnings(msgs):
             info["rho_e_clamps"] += int(mc.group(1))
         elif "Newton iteration did not converge" in m:
             info["newton_fail"] += 1
+            newton.append(m[:300])               # keeps z, step and last correction vs tol, to judge how bad it was
         else:
             other.append(m)
     if info["rho_e_clamps"]:
@@ -181,6 +182,7 @@ def classify_warnings(msgs):
     if other:
         flags.append("solver_warning")
     info["warnings"] = [m[:300] for m in other[:5]]
+    info["newton_msgs"] = newton[:3]
     return flags, info
 
 def _trapz(y, x):
@@ -263,8 +265,10 @@ def run_point_logged(family, dm, logtau):
     if point.get("status") == "ok":
         z_dec = z_at_time(10.0**logtau)
         point["z_decay"] = z_dec
-        if z_dec > Z_START or z_dec < Z_END:      # most of the decay happens before z_start / after z_end: result is truncated
-            flags.append("decay_outside_pde_window")
+        if z_dec > Z_START:                       # most of the decay happened before the PDE starts: signal is lost
+            flags.append("decay_before_pde_start")
+        elif z_dec < Z_END:                       # decay mostly after z_end: only the in-window rate is simulated (response ~ 1/tau)
+            point["decay_after_pde_end"] = True   # informational, NOT a flag
     wflags, info = classify_warnings(msgs)
     flags = wflags + flags
     point.update(info)
@@ -336,17 +340,28 @@ def main():
     ap.add_argument("--rho-e-cap", type=float, default=None,
                     help="raise spectroxide's rho_e caps (needs the patched binary, see patch_rho_cap.py); "
                          "sets SPECTROXIDE_RHO_E_CAP for every solve")
+    ap.add_argument("--logtau-min", type=float, default=float(LOGTAU_GRID[0]),
+                    help="smallest log10(tau/s) to run (multiple of 0.5; default %(default)g)")
+    ap.add_argument("--logtau-max", type=float, default=float(LOGTAU_GRID[-1]),
+                    help="largest log10(tau/s) to run (multiple of 0.5; default %(default)g). Beyond ~15 the response "
+                         "is exactly proportional to 1/tau, so extending the range is cheap and safe to resume")
     ap.add_argument("--list", action="store_true", help="print the grid and exit")
     args = ap.parse_args()
     if args.rho_e_cap:
         os.environ["SPECTROXIDE_RHO_E_CAP"] = repr(float(args.rho_e_cap))   # inherited by the Rust subprocesses
 
-    n_per_dm = len(args.families) * len(LOGTAU_GRID)
+    for v in (args.logtau_min, args.logtau_max):
+        if abs(v*2 - round(v*2)) > 1e-9:
+            sys.exit(f"--logtau-min/max must be multiples of 0.5 (got {v})")
+    if args.logtau_max < args.logtau_min:
+        sys.exit("--logtau-max < --logtau-min")
+    lt_grid = np.arange(args.logtau_min, args.logtau_max + 1e-9, 0.5)
+    n_per_dm = len(args.families) * len(lt_grid)
     if args.list or not args.dm:
         print(f"TAG = {TAG}   cascade: x_cut={X_CUT:g}, photon table {len(X_TABLE)} pts in [{X_TABLE[0]:.2g}, {X_TABLE[-1]:g}]")
         print(f"dm grid ({len(DM_GRID_CMB)}): {' '.join(f'{d:g}' for d in DM_GRID_CMB)}")
-        print(f"log10 tau grid: {len(LOGTAU_GRID)} points ({LOGTAU_GRID[0]:g}..{LOGTAU_GRID[-1]:g})")
-        print(f"families: {args.families}  ->  {n_per_dm} points per dm, {n_per_dm*len(DM_GRID_CMB)} in total")
+        print(f"log10 tau grid: {len(lt_grid)} points ({lt_grid[0]:g}..{lt_grid[-1]:g})")
+        print(f"families: {args.families}  ->  {n_per_dm} points per dm, {n_per_dm*len(DM_GRID_CMB)} in total for the full dm grid")
         return
 
     # snap requested dm to the grid values (so the cache keys match the notebook exactly)
@@ -360,7 +375,7 @@ def main():
     shard_dir = Path(args.shard_dir).expanduser().resolve(); shard_dir.mkdir(parents=True, exist_ok=True)
     out = shard_dir / f"cmb_{TAG}_{args.name}.jsonl"
     done_pts = load_done(shard_dir)
-    todo = [(f, dm, float(lt)) for f in args.families for dm in dms for lt in LOGTAU_GRID
+    todo = [(f, dm, float(lt)) for f in args.families for dm in dms for lt in lt_grid
             if pkey(f, dm, lt) not in done_pts]
     n_all = n_per_dm * len(dms)
     print(f"[{args.name}] TAG={TAG}  dm={dms}  families={args.families}", flush=True)
