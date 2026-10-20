@@ -49,7 +49,7 @@ from Cascades.cascade.mckeen_bridge import (
 DM_GRID_CMB = np.array([0.5, 1, 3, 6, 10, 15, 25, 40, 75, 100, 120], float)   # MeV
 BETAS_CMB   = [0.0, 0.5, 0.9]
 LOGTAU_GRID = np.arange(5.5, 16.5 + 1e-9, 0.5)                                # log10(tau/s)
-RUN_FAMILIES = [f"beta{b:g}" for b in BETAS_CMB] + ["cascade"]
+RUN_FAMILIES = [f"beta{b:g}" for b in BETAS_CMB] + ["cascade", "neutron"]
 
 # ── physics / solver settings (identical to the notebook; they define TAG) ──
 DEN_FAC   = 0.01
@@ -242,9 +242,45 @@ def run_cascade_point(dm_MeV, logtau):
                 mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 grid_h=len(r_h.x), grid_p=len(r_p.x), grid_ok=grid_ok, **extra)
 
+# ── neutron-side energy for chi -> n + gamma (beta-decay e- + p recoil + neutron recoil T_n), as pure heat ──
+# Same energy the beta families already use at beta=0; the cascade family only injects omega_inj, so this
+# is the missing piece.  Heat (T_e -> Compton) is the right channel: it conserves photon number, whereas the
+# bridge's photon-line machinery (x_eff ~ 5.5 for a 0.3 MeV e-, ~ the seed photon energy) would not.
+def _pde_kw():
+    return dict(method="pde", cosmo=COSMO_AK19, z_start=Z_START, z_end=Z_END, z_min=Z_END, z_max=Z_START,
+                n_z=N_Z, x_min=X_MIN, x_max=X_MAX, n_x=N_X, timeout=TIMEOUT_S, dtau_max=DTAU_MAX)
+
+def neutron_side_energy_eV(dm_MeV):
+    T_n = two_body_recoil(dm_MeV*1e6, 0.0)          # = dm^2/(2 m_chi) for a massless photon
+    return E_HEAT_EV + T_n, T_n
+
+def preflight_neutron(dm_MeV):
+    """dq_dz swallows exceptions (returns 0.0); also check the MPR21 rate is linear in energy per decay,
+    which is what lets E_n be passed in place of omega_inj."""
+    from Cascades.cascade import mpr21
+    E_n, _ = neutron_side_energy_eV(dm_MeV)
+    r1 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, E_n)
+    r2 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, 2.0*E_n)
+    if not (r1 > 0 and abs(r2/r1 - 2.0) < 1e-6):
+        raise RuntimeError(f"mpr21 rate not linear in energy per decay (r2/r1={r2/r1 if r1 else None})")
+    v = make_mckeen_dq_dz(E_n, 1e-10, DEN_FAC, force_f_heat=1.0)(1.0e5)
+    if not (np.isfinite(v) and v != 0.0):
+        raise RuntimeError(f"neutron dq_dz(z=1e5) returned {v!r} for dm={dm_MeV:g}")
+
+def run_neutron_point(dm_MeV, logtau):
+    E_n, T_n = neutron_side_energy_eV(dm_MeV)
+    dq_dz = make_mckeen_dq_dz(E_n, 10.0**(-logtau), DEN_FAC, force_f_heat=1.0)
+    r = spectroxide.solve(dq_dz=dq_dz, **_pde_kw())
+    mu, y = float(r.mu), float(r.y)
+    if not (math.isfinite(mu) and math.isfinite(y)) or (mu == 0.0 and y == 0.0):
+        raise RuntimeError(f"neutron point gave mu={mu}, y={y} (zero/non-finite => bridge failed silently)")
+    return dict(mu=mu, y=y, status="ok", E_n_eV=E_n, T_n_eV=T_n, grid=len(r.x))
+
 def run_point(family, dm, logtau):
     if family == "cascade":
         return run_cascade_point(dm, logtau)
+    if family == "neutron":
+        return run_neutron_point(dm, logtau)
     return run_heat_point(float(family.removeprefix("beta")), dm, logtau)
 
 def run_point_logged(family, dm, logtau):
@@ -388,6 +424,11 @@ def main():
         for dm in sorted({d for f, d, _ in todo if f == "cascade"}):
             preflight_cascade(dm)                 # aborts with the real traceback if the cascade module is broken
         print(f"[{args.name}] cascade pre-flight OK", flush=True)
+
+    if "neutron" in {f for f, _, _ in todo}:
+        for dm in sorted({d for f, d, _ in todo if f == "neutron"}):
+            preflight_neutron(dm)
+        print(f"[{args.name}] neutron pre-flight OK", flush=True)
 
     warnings.simplefilter("always")               # don't let Python de-duplicate repeated solver warnings
     warnings.showwarning = _showwarning           # per-thread capture (see run_point_logged)
