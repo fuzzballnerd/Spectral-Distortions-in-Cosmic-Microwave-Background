@@ -26,12 +26,19 @@ Logging / flags (added):
     (status stays "ok"); filter on `flagged` / `flags` when merging.
   * warnings_<name>.log : one line per flagged point;  failed_<name>.log : message + traceback per failed point.
   * cascade points also store mu_heat/y_heat/mu_phot/y_phot, grid sizes, and where the photon line sits.
+
+Electron family (electron_b0, electron_b0.5, electron_b0.9): chi -> n + X (X invisible), the recoil neutron beta-decays
+and its electron (E_e = T_n + E_mean, ELECTRON_MODE) is cascaded through Cascades/cascade/mckeen_electron.py.  Only points
+with E_e >= E_ELEC_CASCADE_MIN_EV (2 MeV: dm >= 75 for beta <= 0.5) are simulated; the rest are stored as
+status="skip_below_electron_cascade_min" (cheap) and the notebook falls back to the beta heat point there.
+Changing ELECTRON_MODE or E_ELEC_CASCADE_MIN_EV recomputes only the electron points (TAG unchanged).
 """
 import argparse, os, sys, json, hashlib, time, math, socket, signal, re, threading, traceback, warnings
 from collections import Counter
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+
 
 # make `Cascades` importable when running from this folder
 for _p in (str(Path(__file__).resolve().parent), os.getcwd()):
@@ -44,12 +51,15 @@ from Cascades.cascade.mckeen_bridge import (
     omega_inj_and_Tn_eV, make_mckeen_dq_dz, make_mckeen_photon_source,
     validate_omega_inj_for_high_energy, validate_pde_z_range,
 )
+from Cascades.cascade.mckeen_electron import (            # cascade started from the beta-decay ELECTRON
+    make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position,
+)
 
 # ── grids (identical to the notebook) ──────────────────────────────────────
 DM_GRID_CMB = np.array([0.5, 1, 3, 6, 10, 15, 25, 40, 75, 100, 120], float)   # MeV
 BETAS_CMB   = [0.0, 0.5, 0.9]
 LOGTAU_GRID = np.arange(5.5, 16.5 + 1e-9, 0.5)                                # log10(tau/s)
-RUN_FAMILIES = [f"beta{b:g}" for b in BETAS_CMB] + ["cascade", "neutron"]
+RUN_FAMILIES = [f"beta{b:g}" for b in BETAS_CMB] + ["cascade"] + [f"electron_b{b:g}" for b in BETAS_CMB]
 
 # ── physics / solver settings (identical to the notebook; they define TAG) ──
 DEN_FAC   = 0.01
@@ -242,45 +252,88 @@ def run_cascade_point(dm_MeV, logtau):
                 mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 grid_h=len(r_h.x), grid_p=len(r_p.x), grid_ok=grid_ok, **extra)
 
-# ── neutron-side energy for chi -> n + gamma (beta-decay e- + p recoil + neutron recoil T_n), as pure heat ──
-# Same energy the beta families already use at beta=0; the cascade family only injects omega_inj, so this
-# is the missing piece.  Heat (T_e -> Compton) is the right channel: it conserves photon number, whereas the
-# bridge's photon-line machinery (x_eff ~ 5.5 for a 0.3 MeV e-, ~ the seed photon energy) would not.
+# ── electron family: the beta-decay electron of the recoil neutron, run through the electron cascade ───────
+# chi -> n + X (X invisible, mass beta*dm); the neutron keeps T_n(beta) and beta-decays.  The electron energy is
+#   "max"       : E_e = T_n + E_mean   (all of the neutron's kinetic energy goes to the electron; the beta families' convention)
+#   "kinematic" : E_e = gamma_n (m_e + E_mean) - m_e  (Doppler-boosted mean), the rest of T_n + E_mean as plain heat
+# The cascade starts from the ELECTRON (budget species "e", line at the electron's own gamma): mckeen_electron.py.
+ELECTRON_MODE = "max"
+# Below this the line-source proxy is invalid (x_eff ~ seed photon energy, photon number not conserved): the point is
+# stored as a skip and the notebook uses the beta heat point (= all heat) there.  Set 0 to cascade everything > 2 m_e.
+E_ELEC_CASCADE_MIN_EV = 2.0e6
+
 def _pde_kw():
     return dict(method="pde", cosmo=COSMO_AK19, z_start=Z_START, z_end=Z_END, z_min=Z_END, z_max=Z_START,
                 n_z=N_Z, x_min=X_MIN, x_max=X_MAX, n_x=N_X, timeout=TIMEOUT_S, dtau_max=DTAU_MAX)
 
-def neutron_side_energy_eV(dm_MeV):
-    T_n = two_body_recoil(dm_MeV*1e6, 0.0)          # = dm^2/(2 m_chi) for a massless photon
-    return E_HEAT_EV + T_n, T_n
+def electron_energies_eV(beta, dm_MeV):
+    """(E_e kinetic, E_rest as plain heat, T_n) per decay."""
+    dm_eV = dm_MeV*1e6
+    T_n = two_body_recoil(dm_eV, beta*dm_eV)
+    E_tot = E_HEAT_EV + T_n
+    if ELECTRON_MODE == "max":
+        return E_tot, 0.0, T_n
+    gam = 1.0 + T_n/M_N_EV
+    E_e = min(gam*(M_E_EV + E_HEAT_EV) - M_E_EV, E_tot)
+    return E_e, E_tot - E_e, T_n
 
-def preflight_neutron(dm_MeV):
-    """dq_dz swallows exceptions (returns 0.0); also check the MPR21 rate is linear in energy per decay,
-    which is what lets E_n be passed in place of omega_inj."""
-    from Cascades.cascade import mpr21
-    E_n, _ = neutron_side_energy_eV(dm_MeV)
-    r1 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, E_n)
-    r2 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, 2.0*E_n)
+def _electron_active(E_e):
+    return E_e >= E_ELEC_CASCADE_MIN_EV and validate_omega_inj_for_high_energy(E_e)
+
+def preflight_electron(beta, dm_MeV):
+    """The closures swallow every exception (-> 0.0), so call the pieces directly here, once, before any compute."""
+    from Cascades.cascade import mckeen_bridge as mb, mpr21
+    E_e, E_rest, _ = electron_energies_eV(beta, dm_MeV)
+    if not _electron_active(E_e):
+        return
+    b = mb._cached_budget("e", E_e, 1.0e5, high_energy=True)               # raises the real error if broken
+    s = b["f_heat"] + b["f_ic"] + b.get("f_subthreshold", 0.0)
+    if not (0.95 < s < 1.05):
+        raise RuntimeError(f"electron budget does not sum to 1 (sum={s:.4f}) for beta={beta:g}, dm={dm_MeV:g}")
+    r1 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, E_e)
+    r2 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, 2.0*E_e)
     if not (r1 > 0 and abs(r2/r1 - 2.0) < 1e-6):
         raise RuntimeError(f"mpr21 rate not linear in energy per decay (r2/r1={r2/r1 if r1 else None})")
-    v = make_mckeen_dq_dz(E_n, 1e-10, DEN_FAC, force_f_heat=1.0)(1.0e5)
-    if not (np.isfinite(v) and v != 0.0):
-        raise RuntimeError(f"neutron dq_dz(z=1e5) returned {v!r} for dm={dm_MeV:g}")
+    v = make_mckeen_electron_dq_dz(E_e, 1e-10, DEN_FAC, E_rest_eV=E_rest)(1.0e5)
+    sp = make_mckeen_electron_photon_source(E_e, 1e-10, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)(X_TABLE, 1.0e5)
+    if not (np.isfinite(v) and v != 0.0 and np.max(sp) > 0.0):
+        raise RuntimeError(f"electron closures fail silently for beta={beta:g}, dm={dm_MeV:g} (dq_dz={v!r})")
 
-def run_neutron_point(dm_MeV, logtau):
-    E_n, T_n = neutron_side_energy_eV(dm_MeV)
-    dq_dz = make_mckeen_dq_dz(E_n, 10.0**(-logtau), DEN_FAC, force_f_heat=1.0)
-    r = spectroxide.solve(dq_dz=dq_dz, **_pde_kw())
-    mu, y = float(r.mu), float(r.y)
+def run_electron_point(beta, dm_MeV, logtau):
+    E_e, E_rest, T_n = electron_energies_eV(beta, dm_MeV)
+    cfg = dict(elec_mode=ELECTRON_MODE, elec_min_eV=E_ELEC_CASCADE_MIN_EV)
+    if not _electron_active(E_e):
+        return dict(mu=float("nan"), y=float("nan"), status="skip_below_electron_cascade_min",
+                    E_e_eV=E_e, T_n_eV=T_n, **cfg)
+    gamma_x, kw = 10.0**(-logtau), _pde_kw()
+    r_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, DEN_FAC, E_rest_eV=E_rest), **kw)
+    src = make_mckeen_electron_photon_source(E_e, gamma_x, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)
+    r_p = spectroxide.solve(photon_source=src, x=X_TABLE, **kw)
+    mu, y = float(r_h.mu + r_p.mu), float(r_h.y + r_p.y)
     if not (math.isfinite(mu) and math.isfinite(y)) or (mu == 0.0 and y == 0.0):
-        raise RuntimeError(f"neutron point gave mu={mu}, y={y} (zero/non-finite => bridge failed silently)")
-    return dict(mu=mu, y=y, status="ok", E_n_eV=E_n, T_n_eV=T_n, grid=len(r.x))
+        raise RuntimeError(f"electron point gave mu={mu}, y={y} (zero/non-finite => bridge failed silently)")
+    flags, extra = [], {}
+    try:                                       # a failing probe must never kill a finished point
+        pr = probe_photon_line(src, logtau, float(r_p.x[-1]))
+        extra.update(line_peak_x=pr["line_peak_x"], line_frac_beyond_grid=pr["line_frac_beyond_grid"])
+        if pr["zero"]:
+            flags.append("photon_source_zero")
+        elif pr["line_frac_beyond_grid"] > 0.05:
+            flags.append("photon_line_beyond_pde_grid")
+    except Exception as e:
+        flags.append("line_probe_failed"); extra["line_probe_error"] = repr(e)[:200]
+    x_raw, x_eff = electron_line_position(E_e, X_CUT)
+    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9*X_CUT))
+    return dict(mu=mu, y=y, status="ok", x_cut=X_CUT, beta=beta, E_e_eV=E_e, E_rest_eV=E_rest, T_n_eV=T_n, _flags=flags,
+                mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
+                grid_h=len(r_h.x), grid_p=len(r_p.x),
+                grid_ok=bool(len(r_h.x) == len(r_p.x) and np.allclose(r_h.x, r_p.x)), **cfg, **extra)
 
 def run_point(family, dm, logtau):
     if family == "cascade":
         return run_cascade_point(dm, logtau)
-    if family == "neutron":
-        return run_neutron_point(dm, logtau)
+    if family.startswith("electron_b"):
+        return run_electron_point(float(family.removeprefix("electron_b")), dm, logtau)
     return run_heat_point(float(family.removeprefix("beta")), dm, logtau)
 
 def run_point_logged(family, dm, logtau):
@@ -328,6 +381,10 @@ def load_done(shard_dir):
                     if rec["key"].startswith("cascade|") and p.get("status") == "ok" \
                             and p.get("x_cut") != X_CUT:
                         continue                  # computed with a different line placement: redo it
+                    if rec["key"].startswith("electron_b") and (
+                            p.get("elec_mode") != ELECTRON_MODE or p.get("elec_min_eV") != E_ELEC_CASCADE_MIN_EV
+                            or (p.get("status") == "ok" and p.get("x_cut") != X_CUT)):
+                        continue                  # other electron mode / threshold / line placement: redo it
                     cap = os.environ.get("SPECTROXIDE_RHO_E_CAP")
                     if cap and "rho_e_clamped" in (p.get("flags") or []) and p.get("rho_e_cap") != cap:
                         continue                  # was clamped under another cap: redo with the raised one
@@ -425,10 +482,11 @@ def main():
             preflight_cascade(dm)                 # aborts with the real traceback if the cascade module is broken
         print(f"[{args.name}] cascade pre-flight OK", flush=True)
 
-    if "neutron" in {f for f, _, _ in todo}:
-        for dm in sorted({d for f, d, _ in todo if f == "neutron"}):
-            preflight_neutron(dm)
-        print(f"[{args.name}] neutron pre-flight OK", flush=True)
+    for f_ in sorted({f for f, _, _ in todo if f.startswith("electron_b")}):
+        b_ = float(f_.removeprefix("electron_b"))
+        for dm in sorted({d for f, d, _ in todo if f == f_}):
+            preflight_electron(b_, dm)            # aborts with the real traceback if the electron cascade is broken
+        print(f"[{args.name}] {f_} pre-flight OK", flush=True)
 
     warnings.simplefilter("always")               # don't let Python de-duplicate repeated solver warnings
     warnings.showwarning = _showwarning           # per-thread capture (see run_point_logged)
