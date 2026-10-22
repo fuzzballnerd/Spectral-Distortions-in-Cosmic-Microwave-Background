@@ -18,6 +18,11 @@ from . import cosmology as cosmo
 from . import rates
 from .mckeen_bridge import _cached_budget, Z_COSMOLOGY_CEILING, G2_0
 
+def _budget(E_e_eV, z):
+    # high_energy=None -> solve_burst auto-selects: Compton+IC-only below 2*m_e, full cascade above.
+    # Below ~keV it reduces to f_heat -> 1 on its own (no artificial switch to the beta case).
+    return _cached_budget("e", E_e_eV, z, high_energy=None)
+
 
 def _log_compress_x_eff(x_eff_raw, x_cut):
     """Same log-compression the bridge uses to keep the line inside the PDE grid."""
@@ -50,7 +55,7 @@ def make_mckeen_electron_dq_dz(E_e_eV, Gamma_X_s, den_fac, E_rest_eV=0.0):
             if z > Z_COSMOLOGY_CEILING:
                 return 0.0
             dt_dz = 1.0 / ((1.0 + z) * cosmo.H(z))
-            f_heat = _cached_budget("e", E_e_eV, z, high_energy=True)["f_heat"]
+            f_heat = _budget(E_e_eV, z)["f_heat"]
             dE = f_heat * mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_e_eV) * dt_dz
             if E_rest_eV > 0.0:
                 dE += mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_rest_eV) * dt_dz
@@ -79,7 +84,7 @@ def make_mckeen_electron_photon_source(E_e_eV, Gamma_X_s, den_fac, x_max_factor=
         try:
             if z > Z_COSMOLOGY_CEILING:
                 return float(zero) if np.ndim(x) == 0 else zero
-            budget = _cached_budget("e", E_e_eV, z, high_energy=True)
+            budget = _budget(E_e_eV, z)
             f_dist = budget["f_ic"] + budget.get("f_subthreshold", 0.0)
             if f_dist <= 0:
                 return float(zero) if np.ndim(x) == 0 else zero
