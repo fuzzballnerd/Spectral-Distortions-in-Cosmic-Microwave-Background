@@ -260,7 +260,7 @@ def run_cascade_point(dm_MeV, logtau):
 ELECTRON_MODE = "max"
 # Below this the line-source proxy is invalid (x_eff ~ seed photon energy, photon number not conserved): the point is
 # stored as a skip and the notebook uses the beta heat point (= all heat) there.  Set 0 to cascade everything > 2 m_e.
-E_ELEC_CASCADE_MIN_EV = 2.0e5
+E_ELEC_CASCADE_MIN_EV = 2.0e3
 
 def _pde_kw():
     return dict(method="pde", cosmo=COSMO_AK19, z_start=Z_START, z_end=Z_END, z_min=Z_END, z_max=Z_START,
