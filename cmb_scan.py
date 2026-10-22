@@ -51,8 +51,8 @@ from Cascades.cascade.mckeen_bridge import (
     omega_inj_and_Tn_eV, make_mckeen_dq_dz, make_mckeen_photon_source,
     validate_omega_inj_for_high_energy, validate_pde_z_range,
 )
-from Cascades.cascade.mckeen_electron import (            # cascade started from the beta-decay ELECTRON
-    make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position,
+from Cascades.cascade.mckeen_electron import (
+    make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position, _budget,
 )
 
 # ── grids (identical to the notebook) ──────────────────────────────────────
@@ -260,7 +260,7 @@ def run_cascade_point(dm_MeV, logtau):
 ELECTRON_MODE = "max"
 # Below this the line-source proxy is invalid (x_eff ~ seed photon energy, photon number not conserved): the point is
 # stored as a skip and the notebook uses the beta heat point (= all heat) there.  Set 0 to cascade everything > 2 m_e.
-E_ELEC_CASCADE_MIN_EV = 2.0e3
+E_ELEC_CASCADE_MIN_EV = 0.0
 
 def _pde_kw():
     return dict(method="pde", cosmo=COSMO_AK19, z_start=Z_START, z_end=Z_END, z_min=Z_END, z_max=Z_START,
@@ -278,7 +278,7 @@ def electron_energies_eV(beta, dm_MeV):
     return E_e, E_tot - E_e, T_n
 
 def _electron_active(E_e):
-    return E_e >= E_ELEC_CASCADE_MIN_EV and validate_omega_inj_for_high_energy(E_e)
+    return E_e > 0.0
 
 def preflight_electron(beta, dm_MeV):
     """The closures swallow every exception (-> 0.0), so call the pieces directly here, once, before any compute."""
@@ -286,7 +286,7 @@ def preflight_electron(beta, dm_MeV):
     E_e, E_rest, _ = electron_energies_eV(beta, dm_MeV)
     if not _electron_active(E_e):
         return
-    b = mb._cached_budget("e", E_e, 1.0e5, high_energy=True)               # raises the real error if broken
+    b = _budget(E_e, 1.0e5)               # raises the real error if broken
     s = b["f_heat"] + b["f_ic"] + b.get("f_subthreshold", 0.0)
     if not (0.95 < s < 1.05):
         raise RuntimeError(f"electron budget does not sum to 1 (sum={s:.4f}) for beta={beta:g}, dm={dm_MeV:g}")
@@ -296,7 +296,7 @@ def preflight_electron(beta, dm_MeV):
         raise RuntimeError(f"mpr21 rate not linear in energy per decay (r2/r1={r2/r1 if r1 else None})")
     v = make_mckeen_electron_dq_dz(E_e, 1e-10, DEN_FAC, E_rest_eV=E_rest)(1.0e5)
     sp = make_mckeen_electron_photon_source(E_e, 1e-10, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)(X_TABLE, 1.0e5)
-    if not (np.isfinite(v) and v != 0.0 and np.max(sp) > 0.0):
+    if not (np.isfinite(v) and v != 0.0 and np.all(np.isfinite(sp))):
         raise RuntimeError(f"electron closures fail silently for beta={beta:g}, dm={dm_MeV:g} (dq_dz={v!r})")
 
 def run_electron_point(beta, dm_MeV, logtau):
@@ -385,6 +385,11 @@ def load_done(shard_dir):
                             p.get("elec_mode") != ELECTRON_MODE or p.get("elec_min_eV") != E_ELEC_CASCADE_MIN_EV
                             or (p.get("status") == "ok" and p.get("x_cut") != X_CUT)):
                         continue                  # other electron mode / threshold / line placement: redo it
+
+                    # ── NEW: old NaN skip records (no threshold any more) must be recomputed ──
+                    if rec["key"].startswith("electron_b") and str(p.get("status", "")).startswith("skip_below"):
+                        continue
+
                     cap = os.environ.get("SPECTROXIDE_RHO_E_CAP")
                     if cap and "rho_e_clamped" in (p.get("flags") or []) and p.get("rho_e_cap") != cap:
                         continue                  # was clamped under another cap: redo with the raised one
