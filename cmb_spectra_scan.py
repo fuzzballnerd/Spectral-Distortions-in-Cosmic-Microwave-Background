@@ -44,7 +44,7 @@ from Cascades.cascade.mckeen_electron import (
     make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position,
 )
 
-BETAS = [0.0, 0.1, 1.0/3.0, 0.9]
+BETAS = [0.0, 0.1, 1.0/3.0, 0.5, 0.9]
 SPEC_VERSION = 1
 
 
@@ -183,7 +183,7 @@ class ShardWriter:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dm", type=float, nargs="+", default=None, help="Delta_m values (MeV), must be in the grid; default: all")
-    ap.add_argument("--betas", type=float, nargs="+", default=BETAS, help="default: 0 0.1 1/3 0.9")
+    ap.add_argument("--betas", type=float, nargs="+", default=BETAS, help="default: 0 0.1 1/3 0.5 0.9")
     ap.add_argument("--workers", type=int, default=os.cpu_count())
     ap.add_argument("--shard-dir", default="Parameter-Space-data/spectra")
     ap.add_argument("--name", default=socket.gethostname())
