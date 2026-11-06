@@ -44,7 +44,7 @@ from Cascades.cascade.mckeen_electron import (
     make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position,
 )
 
-BETAS = [0.0, 0.1, 1.0/3.0, 0.5, 0.9]
+BETAS = [0.0, 0.5, 0.9]
 SPEC_VERSION = 1
 
 
