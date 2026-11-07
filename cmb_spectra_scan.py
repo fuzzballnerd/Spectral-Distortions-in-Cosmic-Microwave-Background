@@ -188,6 +188,11 @@ def main():
     ap.add_argument("--shard-dir", default="Parameter-Space-data/spectra")
     ap.add_argument("--name", default=socket.gethostname())
     ap.add_argument("--rho-e-cap", type=float, default=None)
+    ap.add_argument("--logtau-list", type=float, nargs="+", default=None,
+                help="run exactly these log10(tau/s) values (any spacing); overrides --logtau-min/max")
+    ap.add_argument("--points", default=None,
+                help="CSV with columns beta,dm_MeV,logtau: run exactly these (beta, dm, logtau) points; "
+                     "overrides --betas/--dm/--logtau-*")
     ap.add_argument("--logtau-min", type=float, default=float(cs.LOGTAU_GRID[0]))
     ap.add_argument("--logtau-max", type=float, default=float(cs.LOGTAU_GRID[-1]))
     ap.add_argument("--list", action="store_true")
@@ -195,21 +200,33 @@ def main():
     if args.rho_e_cap:
         os.environ["SPECTROXIDE_RHO_E_CAP"] = repr(float(args.rho_e_cap))
 
-    for v in (args.logtau_min, args.logtau_max):
-        if abs(v*2 - round(v*2)) > 1e-9:
-            sys.exit(f"--logtau-min/max must be multiples of 0.5 (got {v})")
-    if args.logtau_max < args.logtau_min:
-        sys.exit("--logtau-max < --logtau-min")
-    lt_grid = np.arange(args.logtau_min, args.logtau_max + 1e-9, 0.5)
+    import csv
+    if args.logtau_list:
+        lt_grid = np.unique(np.round(args.logtau_list, 3))
+    else:
+        for v in (args.logtau_min, args.logtau_max):
+            if abs(v*2 - round(v*2)) > 1e-9:
+                sys.exit(f"--logtau-min/max must be multiples of 0.5 (got {v})")
+        if args.logtau_max < args.logtau_min:
+            sys.exit("--logtau-max < --logtau-min")
+        lt_grid = np.arange(args.logtau_min, args.logtau_max + 1e-9, 0.5)
 
-    dms = []
-    for d in (args.dm if args.dm else cs.DM_GRID_CMB):
+    def snap_dm(d):
         i = int(np.argmin(np.abs(cs.DM_GRID_CMB - d)))
         if not np.isclose(cs.DM_GRID_CMB[i], d):
             sys.exit(f"dm={d:g} is not in the grid: {[float(x) for x in cs.DM_GRID_CMB]}")
-        dms.append(float(cs.DM_GRID_CMB[i]))
+        return float(cs.DM_GRID_CMB[i])
+
+    dms = [snap_dm(d) for d in (args.dm if args.dm else cs.DM_GRID_CMB)]
     betas = [float(b) for b in args.betas]
-    n_all = len(betas) * len(dms) * len(lt_grid)
+    if args.points:
+        with open(args.points) as fh:
+            combos = sorted({(float(r["beta"]), snap_dm(float(r["dm_MeV"])), round(float(r["logtau"]), 3))
+                            for r in csv.DictReader(fh)})
+        betas = sorted({b for b, _, _ in combos})
+    else:
+        combos = [(b, dm, float(lt)) for b in betas for dm in dms for lt in lt_grid]
+    n_all = len(combos)
 
     if args.list:
         print(f"TAG = {cs.TAG}  electron_mode={cs.ELECTRON_MODE}")
@@ -220,8 +237,7 @@ def main():
     shard_dir = Path(args.shard_dir).expanduser().resolve(); shard_dir.mkdir(parents=True, exist_ok=True)
     out = shard_dir / f"spec_{cs.TAG}_{args.name}.jsonl"
     done_pts = load_spectra(shard_dir)
-    todo = [(b, dm, float(lt)) for b in betas for dm in dms for lt in lt_grid
-            if pkey(b, dm, lt) not in done_pts]
+    todo = [p for p in combos if pkey(*p) not in done_pts]
     print(f"[{args.name}] TAG={cs.TAG}  betas={betas}", flush=True)
     print(f"[{args.name}] {n_all-len(todo)}/{n_all} already on disk, {len(todo)} to run, "
           f"{min(args.workers, max(len(todo),1))} workers -> {out}", flush=True)
