@@ -434,6 +434,8 @@ def main():
     ap.add_argument("--families", nargs="+", default=RUN_FAMILIES, choices=RUN_FAMILIES)
     ap.add_argument("--workers", type=int, default=os.cpu_count(), help="parallel PDE solves (default: all cores)")
     ap.add_argument("--shard-dir", default="Parameter-Space-data/shards")
+    ap.add_argument("--logtau-list", type=float, nargs="+", default=None,
+                help="run exactly these log10(tau/s) values (any spacing, e.g. 10.25 15.75); overrides --logtau-min/max")
     ap.add_argument("--name", default=socket.gethostname(), help="label used in the output file name")
     ap.add_argument("--rho-e-cap", type=float, default=None,
                     help="raise spectroxide's rho_e caps (needs the patched binary, see patch_rho_cap.py); "
@@ -448,12 +450,15 @@ def main():
     if args.rho_e_cap:
         os.environ["SPECTROXIDE_RHO_E_CAP"] = repr(float(args.rho_e_cap))   # inherited by the Rust subprocesses
 
-    for v in (args.logtau_min, args.logtau_max):
-        if abs(v*2 - round(v*2)) > 1e-9:
-            sys.exit(f"--logtau-min/max must be multiples of 0.5 (got {v})")
-    if args.logtau_max < args.logtau_min:
-        sys.exit("--logtau-max < --logtau-min")
-    lt_grid = np.arange(args.logtau_min, args.logtau_max + 1e-9, 0.5)
+    if args.logtau_list:
+        lt_grid = np.unique(np.round(args.logtau_list, 3))      # round(.,3) so pkey (lt=%.3f) matches
+    else:
+        for v in (args.logtau_min, args.logtau_max):
+            if abs(v*2 - round(v*2)) > 1e-9:
+                sys.exit(f"--logtau-min/max must be multiples of 0.5 (got {v})")
+        if args.logtau_max < args.logtau_min:
+            sys.exit("--logtau-max < --logtau-min")
+        lt_grid = np.arange(args.logtau_min, args.logtau_max + 1e-9, 0.5)
     n_per_dm = len(args.families) * len(lt_grid)
     if args.list or not args.dm:
         print(f"TAG = {TAG}   cascade: x_cut={X_CUT:g}, photon table {len(X_TABLE)} pts in [{X_TABLE[0]:.2g}, {X_TABLE[-1]:g}]")
