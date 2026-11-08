@@ -56,7 +56,7 @@ from Cascades.cascade.mckeen_electron import (
 )
 
 # ── grids (identical to the notebook) ──────────────────────────────────────
-DM_GRID_CMB = np.array([0.5, 1, 3, 6, 10, 15, 25, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 95, 100, 110, 120, 130], float)   # MeV
+DM_GRID_CMB = np.array([0.5, 1, 3, 6, 10, 15, 16, 18, 20, 22, 24, 25, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 95, 100, 110, 120, 130], float)   # MeV
 BETAS_CMB   = [0.0, 0.5, 0.9]
 LOGTAU_GRID = np.arange(5.5, 19.5 + 1e-9, 0.5)                                # log10(tau/s)
 RUN_FAMILIES = [f"beta{b:g}" for b in BETAS_CMB] + ["cascade"] + [f"electron_b{b:g}" for b in BETAS_CMB]
