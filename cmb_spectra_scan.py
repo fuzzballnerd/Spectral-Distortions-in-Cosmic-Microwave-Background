@@ -311,7 +311,7 @@ def main():
     shard_dir = Path(args.shard_dir).expanduser().resolve(); shard_dir.mkdir(parents=True, exist_ok=True)
     out = shard_dir / f"spec_{cs.TAG}_{args.name}.jsonl"
     done_pts = load_spectra(shard_dir)
-    todo = [p for p in combos if pkey(*p) not in done_pts]
+    todo = [p for p in combos if key_of(*p) not in done_pts]
     print(f"[{args.name}] TAG={cs.TAG}  betas={betas}", flush=True)
     print(f"[{args.name}] {n_all-len(todo)}/{n_all} already on disk, {len(todo)} to run, "
           f"{min(args.workers, max(len(todo),1))} workers -> {out}", flush=True)
