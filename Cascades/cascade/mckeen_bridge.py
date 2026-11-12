@@ -274,7 +274,7 @@ def make_mckeen_photon_source(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=110
 
             T_K = cosmo.T_gamma(z)
             kT_eV = rates.K_B_EV_PER_K * T_K
-                        x_cut = x_max_factor
+            x_cut = x_max_factor
             x_top_ = 1.4 * x_cut if x_top is None else x_top
 
             budget = _cached_budget("gamma", omega_inj_eV, z, high_energy=True)
