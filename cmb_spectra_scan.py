@@ -44,6 +44,10 @@ from Cascades.cascade.mckeen_electron import (
     make_mckeen_electron_dq_dz, make_mckeen_electron_photon_source, electron_line_position,
 )
 
+from Cascades.cascade.mckeen_bridge import (
+    omega_inj_and_Tn_eV, make_mckeen_dq_dz, make_mckeen_photon_source, validate_omega_inj_for_high_energy,
+)
+
 BETAS = [0.0, 0.5, 0.9]
 SPEC_VERSION = 1
 
@@ -101,12 +105,73 @@ def run_point_spectrum(beta, dm_MeV, logtau):
                 x_tot=_arr(xt), dn_tot=_arr(dn_tot),
                 grid_h=len(xh), grid_p=len(xp), _flags=flags, **extra)
 
+def pkey_gamma(dm, logtau):
+    return f"cascade|dm={dm:.6g}|lt={logtau:.3f}"
 
-def run_point_logged(beta, dm, logtau):
+def run_gamma_spectrum(dm_MeV, logtau):
+    """chi -> n + gamma: photon cascade of the decay photon (mckeen_bridge)
+                       + beta-decay electron of the recoiling neutron (mckeen_electron, recoil = beta 0)."""
+    dm_eV, gamma_x, kw = dm_MeV*1e6, 10.0**(-logtau), cs._pde_kw()
+    omega, T_n = omega_inj_and_Tn_eV(dm_eV)
+    base = dict(spec_version=SPEC_VERSION, family="gamma", dm_MeV=dm_MeV, logtau=logtau,
+                omega_inj_eV=omega, T_n_eV=T_n, elec_mode=cs.ELECTRON_MODE, x_cut=cs.X_CUT)
+    if not validate_omega_inj_for_high_energy(omega):          # photon below 2 m_e: the bridge cannot cascade it
+        return dict(status="skip_below_pair_threshold", **base)
+
+    # (1) photon cascade
+    src_g = make_mckeen_photon_source(omega, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN)
+    rg_h = spectroxide.solve(dq_dz=make_mckeen_dq_dz(omega, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT), **kw)
+    rg_p = spectroxide.solve(photon_source=src_g, x=cs.X_TABLE, **kw)
+    # (2) neutron beta-decay electron (same E_e as electron|beta=0)
+    E_e, E_rest, _ = cs.electron_energies_eV(0.0, dm_MeV)
+    src_e = make_mckeen_electron_photon_source(E_e, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN)
+    re_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, cs.DEN_FAC, E_rest_eV=E_rest), **kw)
+    re_p = spectroxide.solve(photon_source=src_e, x=cs.X_TABLE, **kw)
+
+    runs = {"heat_g": rg_h, "phot_g": rg_p, "heat_e": re_h, "phot_e": re_p}
+    arr = {k: (np.asarray(r.x, float), np.asarray(r.delta_n, float)) for k, r in runs.items()}
+    if not all(np.all(np.isfinite(d)) for _, d in arr.values()):
+        raise RuntimeError("non-finite spectrum => bridge failed silently")
+    mu, y = sum(float(r.mu) for r in runs.values()), sum(float(r.y) for r in runs.values())
+    if mu == 0.0 and y == 0.0:
+        raise RuntimeError("mu = y = 0 => bridge failed silently")
+
+    # total on the union grid; photon runs are 0 outside their own grid (not held at the edge value)
+    xt = np.unique(np.concatenate([x for x, _ in arr.values()]))
+    xt = xt[xt <= min(arr["heat_g"][0].max(), arr["heat_e"][0].max())]
+    lx = np.log(xt)
+    dn_tot = sum(np.interp(lx, np.log(x), d, left=0.0, right=0.0) if k.startswith("phot")
+                 else np.interp(lx, np.log(x), d) for k, (x, d) in arr.items())
+
+    flags, extra = [], {}
+    for tag, src, r in (("g", src_g, rg_p), ("e", src_e, re_p)):
+        try:
+            pr = cs.probe_photon_line(src, logtau, float(r.x[-1]))
+            extra[f"line_peak_x_{tag}"], extra[f"line_frac_beyond_grid_{tag}"] = pr["line_peak_x"], pr["line_frac_beyond_grid"]
+            if pr["zero"]: flags.append(f"photon_source_zero_{tag}")
+            elif pr["line_frac_beyond_grid"] > 0.05: flags.append(f"photon_line_beyond_pde_grid_{tag}")
+        except Exception as e:
+            flags.append(f"line_probe_failed_{tag}")
+    xg_raw, xg_eff = cs.line_position(omega)
+    xe_raw, xe_eff = electron_line_position(E_e, cs.X_CUT)
+    extra.update(x_raw_g=xg_raw, x_eff_g=xg_eff, line_pinned_g=bool(xg_raw > 0.9*cs.X_CUT),
+                 x_raw_e=xe_raw, x_eff_e=xe_eff, line_pinned_e=bool(xe_raw > 0.9*cs.X_CUT),
+                 line_pinned=bool(xg_raw > 0.9*cs.X_CUT or xe_raw > 0.9*cs.X_CUT))
+
+    out = dict(status="ok", **base, E_e_eV=E_e, E_rest_eV=E_rest, mu=mu, y=y,
+               x_tot=_arr(xt), dn_tot=_arr(dn_tot), _flags=flags, **extra)
+    for k, r in runs.items():
+        out[f"mu_{k}"], out[f"y_{k}"] = float(r.mu), float(r.y)
+        out[f"x_{k}"], out[f"dn_{k}"] = _arr(arr[k][0]), _arr(arr[k][1])
+        out[f"grid_{k}"] = len(arr[k][0])
+    return out
+
+
+def run_point_logged(family, beta, dm, logtau):
     cs._tls.buf = []
     t0 = time.time()
     try:
-        point = run_point_spectrum(beta, dm, logtau)
+        point = run_point_spectrum(beta, dm, logtau) if family == "electron" else run_gamma_spectrum(dm, logtau)
         msgs = list(cs._tls.buf)
     except Exception as e:
         e.captured_warnings = [m for m in cs._tls.buf if "Progress:" not in m]
@@ -193,6 +258,7 @@ def main():
     ap.add_argument("--points", default=None,
                 help="CSV with columns beta,dm_MeV,logtau: run exactly these (beta, dm, logtau) points; "
                      "overrides --betas/--dm/--logtau-*")
+    ap.add_argument("--families", nargs="+", default=["electron"], choices=["electron", "gamma"])
     ap.add_argument("--logtau-min", type=float, default=float(cs.LOGTAU_GRID[0]))
     ap.add_argument("--logtau-max", type=float, default=float(cs.LOGTAU_GRID[-1]))
     ap.add_argument("--list", action="store_true")
@@ -221,15 +287,23 @@ def main():
     betas = [float(b) for b in args.betas]
     if args.points:
         with open(args.points) as fh:
-            combos = sorted({(float(r["beta"]), snap_dm(float(r["dm_MeV"])), round(float(r["logtau"]), 3))
-                            for r in csv.DictReader(fh)})
-        betas = sorted({b for b, _, _ in combos})
+            combos = sorted({("electron", float(r["beta"]), snap_dm(float(r["dm_MeV"])), round(float(r["logtau"]), 3))
+                             for r in csv.DictReader(fh)})
+        betas = sorted({b for _, b, _, _ in combos})
     else:
-        combos = [(b, dm, float(lt)) for b in betas for dm in dms for lt in lt_grid]
+        combos = []
+        if "electron" in args.families:
+            combos += [("electron", b, dm, float(lt)) for b in betas for dm in dms for lt in lt_grid]
+        if "gamma" in args.families:
+            combos += [("gamma", None, dm, float(lt)) for dm in dms for lt in lt_grid]
     n_all = len(combos)
+
+    def key_of(f, b, dm, lt):
+        return pkey(b, dm, lt) if f == "electron" else pkey_gamma(dm, lt)
 
     if args.list:
         print(f"TAG = {cs.TAG}  electron_mode={cs.ELECTRON_MODE}")
+        print(f"[{args.name}] TAG={cs.TAG}  families={args.families}  betas={betas}", flush=True)
         print(f"betas: {betas}\ndm: {dms}\nlog10 tau: {lt_grid[0]:g}..{lt_grid[-1]:g} ({len(lt_grid)} pts)")
         print(f"total points: {n_all}")
         return
@@ -244,10 +318,13 @@ def main():
     if not todo:
         return
 
-    for b in sorted({b for b, _, _ in todo}):
-        for dm in sorted({d for bb, d, _ in todo if bb == b}):
-            cs.preflight_electron(b, dm)             # aborts with the real traceback if the cascade is broken
-        print(f"[{args.name}] beta={b:.4g} pre-flight OK", flush=True)
+    for f, b, dm in sorted({(f, b, dm) for f, b, dm, _ in todo}, key=str):
+        if f == "electron":
+            cs.preflight_electron(b, dm)
+        else:
+            cs.preflight_cascade(dm)
+            cs.preflight_electron(0.0, dm)
+        print(f"[{args.name}] {f} {'beta=%.4g ' % b if b is not None else ''}dm={dm:g} pre-flight OK", flush=True)
 
     warnings.simplefilter("always")
     warnings.showwarning = cs._showwarning
@@ -265,8 +342,8 @@ def main():
     try:
         futs = {ex.submit(run_point_logged, *p): p for p in todo}
         for fut in as_completed(futs):
-            b, dm, lt = futs[fut]
-            key = pkey(b, dm, lt)
+            f, b, dm, lt = futs[fut]
+            key = key_of(f, b, dm, lt)
             try:
                 point = fut.result()
             except Exception as e:
@@ -285,7 +362,8 @@ def main():
                     print("  " + msg, flush=True)
                     cs.safe_append(warn_log, msg)
             n = ok + failed; el = time.time() - t0
-            print(f"  {n}/{len(todo)}  ok={ok} (flagged={nflag}) failed={failed}  last: beta={b:.4g} dm={dm:g} lt={lt:g}  "
+            print(f"  {n}/{len(todo)}  ok={ok} (flagged={nflag}) failed={failed}  last: {f} "
+                  f"{'beta=%.4g ' % b if b is not None else ''}dm={dm:g} lt={lt:g}  "
                   f"elapsed {el/60:.1f} min, ETA {el/n*(len(todo)-n)/60:.1f} min", flush=True)
     except KeyboardInterrupt:
         print("interrupted - every finished point is on disk; rerun the same command to resume", flush=True)
