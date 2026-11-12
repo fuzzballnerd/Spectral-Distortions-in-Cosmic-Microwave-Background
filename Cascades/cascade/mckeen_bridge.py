@@ -22,6 +22,7 @@ from . import mpr21
 from . import solve_burst as sb
 from . import cosmology as cosmo
 from . import rates
+from .recoil_overflow import overflow_split
 
 # MPR21 Eq. 7's two-body treatment stops describing the physics once
 # m_chi - m_n exceeds the pi0 mass -- hadronic final states open up with
@@ -177,6 +178,9 @@ def make_mckeen_dq_dz(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=None,
         entirely, to compare against the attached script's 100%-heat
         approximation). None (default) uses the real budget['f_heat'].
     """
+    x_cut = x_max_factor
+    x_raw = gamma_line_x_raw(omega_inj_eV)
+    overflow = x_cut is not None and x_raw > x_cut
 
     def dq_dz(z):
         try:
@@ -192,6 +196,9 @@ def make_mckeen_dq_dz(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=None,
             else:
                 budget = _cached_budget("gamma", omega_inj_eV, z, high_energy=True)
                 f_heat = budget["f_heat"]
+                if overflow:     # recoil energy of the IC line above x_cut (recoil_overflow.overflow_split)
+                    f_heat += ((budget["f_ic"] + budget.get("f_subthreshold", 0.0))
+                               * overflow_split(x_raw, z, x_cut)[2])
             val = f_heat * dE_dz_eV_cm3 / sb.rho_cmb_eV_cm3(z)
             if np.isfinite(val):
                 return float(val)
@@ -201,13 +208,20 @@ def make_mckeen_dq_dz(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=None,
 
     return dq_dz
 
+def gamma_line_x_raw(omega_inj_eV):
+    """x of the cascade's IC line: (4/3) gamma^2 beta^2 <E_CMB>/kT at the first-generation pair electron energy
+    (omega - 2 m_e)/2 -- the proxy make_mckeen_photon_source has always used (see the comment there)."""
+    E_each_eV = max(omega_inj_eV - 2.0 * rates.M_E_EV, 0.0) / 2.0
+    gamma_e = 1.0 + E_each_eV / rates.M_E_EV
+    beta2 = 1.0 - 1.0 / gamma_e ** 2
+    return (4.0 / 3.0) * gamma_e ** 2 * beta2 * sb.E_CMB_MEAN_FACTOR
 
 # G_2^(0) = 2*zeta(3), SPX Eq. 1 (same constant interface.py uses).
 G2_0 = 2.0 * 1.2020569031595943
 
 
-def make_mckeen_photon_source(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=35.0,
-                               x_min=1.0e-3):
+def make_mckeen_photon_source(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=110.0,
+                               x_min=1.0e-3, x_top=None):
     """
     Build the photon/distortion-channel photon_source(x, z) callable for
     the McKeen chi -> n + gamma scenario, in spectroxide's occupation-
@@ -260,11 +274,16 @@ def make_mckeen_photon_source(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=35.
 
             T_K = cosmo.T_gamma(z)
             kT_eV = rates.K_B_EV_PER_K * T_K
-            x_cut = x_max_factor
+                        x_cut = x_max_factor
+            x_top_ = 1.4 * x_cut if x_top is None else x_top
 
             budget = _cached_budget("gamma", omega_inj_eV, z, high_energy=True)
             f_distortion = budget["f_ic"] + budget.get("f_subthreshold", 0.0)
-            if f_distortion <= 0:
+            # line position: true x_raw if <= x_cut, else the photons that reach x_cut are injected there with
+            # energy fraction f_ph = x_cut/x_raw (same number); the recoil energy is heat in make_mckeen_dq_dz.
+            x_eff_raw = gamma_line_x_raw(omega_inj_eV)
+            x_inj, f_ph, _ = overflow_split(x_eff_raw, z, x_cut)
+            if f_distortion <= 0 or x_inj is None or f_ph <= 0:
                 if np.ndim(x) == 0:
                     return 0.0
                 return np.zeros_like(np.asarray(x, dtype=float))
@@ -274,54 +293,15 @@ def make_mckeen_photon_source(omega_inj_eV, Gamma_X_s, den_fac, x_max_factor=35.
             )
             dt_dz = 1.0 / ((1.0 + z) * cosmo.H(z))
             dE_dz_eV_cm3 = rate_eV_cm3_s * dt_dz
-            dE_over_rho_dz = f_distortion * dE_dz_eV_cm3 / sb.rho_cmb_eV_cm3(z)
+            dE_over_rho_dz = f_distortion * f_ph * dE_dz_eV_cm3 / sb.rho_cmb_eV_cm3(z)
 
-            # Characteristic x for the line. chi -> n + gamma is direct
-            # photon injection, but at these (McKeen-scale, MeV) energies
-            # the dominant loss channels feeding f_ic/f_subthreshold are
-            # pair production and Compton recoil (photon_cascade_full,
-            # solve_burst.py), both of which hand the energy off to
-            # daughter electrons that are then run back through
-            # electron_cascade -- i.e. there *is* an electron Lorentz
-            # factor to speak of, one level down in the recursion.
-            # Anchoring on the raw, un-cascaded omega_inj/kT therefore
-            # places the line at the wrong energy scale (pins it against
-            # x_cut for the whole sweep). Fix: reuse interface.py's own
-            # e/e+ formula (electron_cascade's characteristic-photon
-            # energy, (4/3) gamma^2 beta^2 <E_CMB>), evaluated at the
-            # pair-production daughter-electron energy (omega_inj -
-            # 2*m_e)/2 -- the same split solve_burst.py:359-361 uses --
-            # as a first-generation proxy for where the degraded photons
-            # actually land.
-            E_each_eV = max(omega_inj_eV - 2.0 * rates.M_E_EV, 0.0) / 2.0
-            gamma_e = 1.0 + E_each_eV / rates.M_E_EV
-            beta2 = 1.0 - 1.0 / gamma_e ** 2
-            x_eff_raw = (4.0 / 3.0) * gamma_e ** 2 * beta2 * sb.E_CMB_MEAN_FACTOR
-
-            x_anchor = 0.9 * x_cut
-            if np.ndim(x_eff_raw) == 0:
-                if x_eff_raw <= x_anchor:
-                    x_eff = max(x_eff_raw, 1.0)
-                else:
-                    u = np.log(x_eff_raw / x_anchor)
-                    x_eff = x_anchor + (x_cut - x_anchor) * u / (1.0 + u)
-            else:
-                u = np.log(np.maximum(x_eff_raw, x_anchor) / x_anchor)
-                x_eff = np.where(
-                    x_eff_raw <= x_anchor,
-                    np.maximum(x_eff_raw, 1.0),
-                    x_anchor + (x_cut - x_anchor) * u / (1.0 + u),
-                )
-
+            x_eff = max(x_inj, 1.0)
             dN_over_N_dz = dE_over_rho_dz * (sb.E_CMB_MEAN_FACTOR / x_eff)
 
-            sigma_x = min(0.1 * x_eff, (x_cut - x_eff) / 4.0)
+            sigma_x = min(0.1 * x_eff, (x_top_ - x_eff) / 4.0)
             x_arr = np.asarray(x, dtype=float)
-            if np.any(x_arr > x_cut) or np.any(x_arr < x_min):
-                line = np.where((x_arr <= x_cut) & (x_arr >= x_min),
-                                 np.exp(-0.5 * ((x_arr - x_eff) / sigma_x) ** 2), 0.0)
-            else:
-                line = np.exp(-0.5 * ((x_arr - x_eff) / sigma_x) ** 2)
+            line = np.where((x_arr < x_top_) & (x_arr >= x_min),
+                            np.exp(-0.5 * ((x_arr - x_eff) / sigma_x) ** 2), 0.0)
             norm = sigma_x * np.sqrt(2.0 * np.pi)
             d_deltaN_N_dx_dz = dN_over_N_dz * line / norm
 

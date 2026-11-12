@@ -16,12 +16,24 @@ from . import mpr21
 from . import solve_burst as sb
 from . import cosmology as cosmo
 from . import rates
-from .mckeen_bridge import _cached_budget, Z_COSMOLOGY_CEILING, G2_0
+from .mckeen_bridge import _cached_budget, Z_COSMOLOGY_CEILING, G2_0, lru_cache
+from .recoil_overflow import overflow_split
 
+E_MIN_EV = 1000.0   # solve_burst.electron_heat_fraction's default floor
+
+@lru_cache(maxsize=None)
 def _budget(E_e_eV, z):
-    # high_energy=None -> solve_burst auto-selects: Compton+IC-only below 2*m_e, full cascade above.
-    # Below ~keV it reduces to f_heat -> 1 on its own (no artificial switch to the beta case).
-    return _cached_budget("e", E_e_eV, z, high_energy=None)
+    """Electron energy budget, any E_e > 0, no artificial switch to the beta case.
+    > 2 m_e : full cascade (as before).
+    <= 2 m_e: Compton+IC-only solver, with the bottom E_min of the electron's energy added back
+              (solve_burst.electron_heat_fraction integrates E_min..E0 but never books the E_min itself;
+              electron_cascade does book it).  f_heat -> 1 smoothly as E_e -> 0."""
+    if E_e_eV > 2.0 * rates.M_E_EV:
+        return _cached_budget("e", E_e_eV, z, high_energy=True)
+    f = sb.electron_heat_fraction(E_e_eV, z)          # returns 1.0 already for E_e <= E_MIN_EV
+    if E_e_eV > E_MIN_EV:
+        f = min(1.0, f + E_MIN_EV / E_e_eV)
+    return {"f_heat": f, "f_ic": 1.0 - f, "f_subthreshold": 0.0}
 
 
 def _log_compress_x_eff(x_eff_raw, x_cut):
@@ -33,29 +45,39 @@ def _log_compress_x_eff(x_eff_raw, x_cut):
     return x_anchor + (x_cut - x_anchor) * u / (1.0 + u)
 
 
-def electron_line_position(E_e_eV, x_cut=35.0):
-    """(x_raw, x_eff) of the IC line for an electron of kinetic energy E_e_eV:
-    x_raw = (4/3) gamma^2 beta^2 <E_CMB>/kT  (electron_cascade's characteristic photon, interface.py's e/e+ branch)."""
+def electron_line_position(E_e_eV, x_cut=110.0):
+    """(x_raw, x_line) of the IC line for an electron of kinetic energy E_e_eV.
+    x_raw = (4/3) gamma^2 beta^2 <E_CMB>/kT  (electron_cascade's characteristic photon, interface.py's e/e+ branch).
+    No squashing any more:  x_line = x_raw (floored at 1, as before) if x_raw <= x_cut,
+                            x_line = x_cut otherwise (where recoil_overflow re-injects the photons that reach it)."""
     gamma_e = 1.0 + E_e_eV / rates.M_E_EV
     beta2 = 1.0 - 1.0 / gamma_e ** 2
     raw = (4.0 / 3.0) * gamma_e ** 2 * beta2 * sb.E_CMB_MEAN_FACTOR
-    return raw, _log_compress_x_eff(raw, x_cut)
+    return raw, (max(raw, 1.0) if raw <= x_cut else float(x_cut))
 
 
-def make_mckeen_electron_dq_dz(E_e_eV, Gamma_X_s, den_fac, E_rest_eV=0.0):
+def make_mckeen_electron_dq_dz(E_e_eV, Gamma_X_s, den_fac, E_rest_eV=0.0, x_cut=None):
     """
     Heat channel: f_heat(E_e, z) x rate(E_e)  [+ E_rest_eV deposited as plain heat, e.g. the part of T_n + E_mean
-    not carried by the electron in 'kinematic' mode; 0 in 'max' mode].
+    not carried by the electron in 'kinematic' mode; 0 in 'max' mode]
+    [+ if x_cut is given and the IC line sits above it: the recoil energy the line loses before it reaches x_cut
+       (recoil_overflow.overflow_split) -- MUST be the same x_cut as the photon source's x_max_factor].
 
     E_e_eV : electron KINETIC energy per decay (burst_energy_budget('e', E0) takes kinetic energy and returns
              fractions of it); also the energy per decay fed to the MPR21 rate.
     """
+    x_raw = electron_line_position(E_e_eV)[0]
+    overflow = x_cut is not None and x_raw > x_cut
+
     def dq_dz(z):
         try:
             if z > Z_COSMOLOGY_CEILING:
                 return 0.0
             dt_dz = 1.0 / ((1.0 + z) * cosmo.H(z))
-            f_heat = _budget(E_e_eV, z)["f_heat"]
+            b = _budget(E_e_eV, z)
+            f_heat = b["f_heat"]
+            if overflow:
+                f_heat += (b["f_ic"] + b.get("f_subthreshold", 0.0)) * overflow_split(x_raw, z, x_cut)[2]
             dE = f_heat * mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_e_eV) * dt_dz
             if E_rest_eV > 0.0:
                 dE += mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_rest_eV) * dt_dz
@@ -66,17 +88,21 @@ def make_mckeen_electron_dq_dz(E_e_eV, Gamma_X_s, den_fac, E_rest_eV=0.0):
     return dq_dz
 
 
-def make_mckeen_electron_photon_source(E_e_eV, Gamma_X_s, den_fac, x_max_factor=35.0, x_min=1.0e-3):
+def make_mckeen_electron_photon_source(E_e_eV, Gamma_X_s, den_fac, x_max_factor=110.0, x_min=1.0e-3, x_top=None):
     """
-    Photon channel: (f_ic + f_subthreshold) x rate(E_e) as a narrow Gaussian line at the electron's own x_eff
-    (z-independent for a fixed E_e), converted to spectroxide's occupation-number source exactly as the bridge does
-    (number fraction = energy fraction x <E_CMB>/(x_eff kT), G2_0/x^2 factor).
-
-    x_max_factor must equal the x_cut used by the caller (cmb_scan.X_CUT), as in the bridge.
+    Photon channel: (f_ic + f_subthreshold) x rate(E_e) as a Gaussian line, converted to spectroxide's
+    occupation-number source exactly as the bridge does (number fraction = energy fraction x <E_CMB>/(x kT),
+    G2_0/x^2 factor).
+      x_raw <= x_cut : line at its true position x_raw, width sigma = min(0.1 x, (x_top - x)/4)   (no squashing)
+      x_raw >  x_cut : recoil_overflow.overflow_split -> the photons that reach x_cut are injected there with
+                       energy fraction x_cut/x_raw (same photon number); the rest is heat in the dq_dz builder.
+    x_max_factor (= x_cut) MUST equal the x_cut passed to make_mckeen_electron_dq_dz.  x_top = top of the source
+    (default 1.4 x_cut) must lie below the PDE grid's x_max.
     """
     x_cut = x_max_factor
-    _, x_eff = electron_line_position(E_e_eV, x_cut)
-    sigma_x = min(0.1 * x_eff, (x_cut - x_eff) / 4.0)
+    x_top = 1.4 * x_cut if x_top is None else x_top
+    x_raw, x_line = electron_line_position(E_e_eV, x_cut)
+    sigma_x = min(0.1 * x_line, (x_top - x_line) / 4.0)
 
     def photon_source(x, z):
         x_arr = np.asarray(x, dtype=float)
@@ -86,14 +112,15 @@ def make_mckeen_electron_photon_source(E_e_eV, Gamma_X_s, den_fac, x_max_factor=
                 return float(zero) if np.ndim(x) == 0 else zero
             budget = _budget(E_e_eV, z)
             f_dist = budget["f_ic"] + budget.get("f_subthreshold", 0.0)
-            if f_dist <= 0:
+            x_inj, f_ph, _ = overflow_split(x_raw, z, x_cut)
+            if f_dist <= 0 or x_inj is None or f_ph <= 0:
                 return float(zero) if np.ndim(x) == 0 else zero
             dt_dz = 1.0 / ((1.0 + z) * cosmo.H(z))
-            dE_over_rho_dz = (f_dist * mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_e_eV)
+            dE_over_rho_dz = (f_dist * f_ph * mpr21.mpr21_energy_injection_rate_eV_cm3_s(z, den_fac, Gamma_X_s, E_e_eV)
                               * dt_dz / sb.rho_cmb_eV_cm3(z))
-            dN_over_N_dz = dE_over_rho_dz * (sb.E_CMB_MEAN_FACTOR / x_eff)
-            line = np.where((x_arr <= x_cut) & (x_arr >= x_min),
-                            np.exp(-0.5 * ((x_arr - x_eff) / sigma_x) ** 2), 0.0)
+            dN_over_N_dz = dE_over_rho_dz * (sb.E_CMB_MEAN_FACTOR / x_line)
+            line = np.where((x_arr < x_top) & (x_arr >= x_min),
+                            np.exp(-0.5 * ((x_arr - x_line) / sigma_x) ** 2), 0.0)
             val = (G2_0 / x_arr ** 2) * dN_over_N_dz * line / (sigma_x * np.sqrt(2.0 * np.pi))
             result = np.where(np.isfinite(val), val, 0.0)
             return float(result) if np.ndim(x) == 0 else result
