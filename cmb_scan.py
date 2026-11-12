@@ -72,35 +72,48 @@ COSMO_AK19 = dict(h=0.6688, omega_b=0.0221/0.6688**2, omega_m=(0.0221+0.1206)/0.
                   y_p=0.24, t_cmb=2.726, n_eff=3.046)
 validate_pde_z_range(Z_START, Z_END, Z_END, Z_START)
 
+# ── frequency range of the photon lines (x110) ──────────────────────────────
+# X_CUT     : lines with x_raw <= X_CUT sit at their TRUE position (no squashing).  Lines above it are degraded
+#             analytically by Compton recoil (Cascades/cascade/recoil_overflow.py): the photons that reach X_CUT are
+#             injected there, the recoil energy is heat.  110 > PIXIE's top (6 THz = x 105.6).
+# X_TOP     : top of the photon-source table; the Gaussian is cut here (sigma = min(0.1 x, (X_TOP - x)/4)).
+# PDE_X_MAX : top of spectroxide's PDE grid, passed to the Rust binary through SPECTROXIDE_X_MAX (needs the
+#             cli.rs patch + a rebuild).  The linear spacing (0.0229) is kept, so the grid grows to ~8150 points.
+X_CUT, X_TOP, PDE_X_MAX = 110.0, 150.0, 155.0
+os.environ["SPECTROXIDE_X_MAX"] = repr(PDE_X_MAX)            # inherited by every Rust subprocess
+
 SETTINGS = dict(den_fac=DEN_FAC, e_heat_ev=E_HEAT_EV, z=(Z_START, Z_END), x=(X_MIN, X_MAX, N_X),
-                n_z=N_Z, dtau_max=DTAU_MAX, cosmo_cascade=COSMO_AK19, version=1)
+                n_z=N_Z, dtau_max=DTAU_MAX, cosmo_cascade=COSMO_AK19, version=1,
+                x_lines=(X_CUT, X_TOP, PDE_X_MAX))
 TAG = hashlib.md5(json.dumps(SETTINGS, sort_keys=True).encode()).hexdigest()[:8]
 
-# ── photon-line placement for the cascade (NEW, version 2) ──────────────────
-# The PDE integrates on spectroxide's production grid, x in [1e-5, 60] -- NOT on [X_MIN, X_MAX].  The bridge pins
-# the line below x_cut, so x_cut must sit well inside 60.  35 is the bridge's own default (and the paper's cap
-# for the non-relativistic kernel).  With the old value (80) the line sat at x ~ 75-79, entirely off the grid, and
-# its energy was lost.  The photon table gets its own grid: log below 25, fine linear spacing (~0.025, matching the
-# PDE grid) from 25 to 40 so the narrow Gaussian is resolved.
-X_CUT = 35.0
-_xt = np.r_[np.logspace(np.log10(X_MIN), np.log10(25.0), 500, endpoint=False), np.linspace(25.0, 40.0, 600)]
+# ── photon-line placement for the cascade (version 3: no squashing, recoil overflow above X_CUT) ────────────
+# Photon table: log below 25, linear with spacing 0.1 from 25 to X_TOP (every line above x = 25 has
+# sigma = 0.1 x >= 2.5, i.e. >= 25 table points per sigma).  The last point is X_TOP, where the source is 0.
+_xt = np.r_[np.logspace(np.log10(X_MIN), np.log10(25.0), 500, endpoint=False),
+            np.linspace(25.0, X_TOP, int(round((X_TOP - 25.0)/0.1)) + 1)]
 # spectroxide's CSV writer prints each x with 10 significant digits and Rust requires a strictly ascending grid,
 # so de-duplicate *after* rounding to that precision (np.unique on raw floats left 25.0 twice).
 X_TABLE = np.array(sorted({float(f"{v:.10e}") for v in _xt}))
-assert np.all(np.diff(X_TABLE) > 0)
-CASCADE_SETTINGS = dict(version=2, x_cut=X_CUT, x_table=(float(X_TABLE[0]), float(X_TABLE[-1]), int(len(X_TABLE))))
+assert np.all(np.diff(X_TABLE) > 0) and X_TABLE[-1] < PDE_X_MAX
+CASCADE_SETTINGS = dict(version=3, x_cut=X_CUT, x_top=X_TOP, pde_x_max=PDE_X_MAX,
+                        x_table=(float(X_TABLE[0]), float(X_TABLE[-1]), int(len(X_TABLE))))
 M_E_EV, E_CMB_MEAN_FACTOR = 0.51099895e6, 2.701     # only used to record where the line is placed
 
 def line_position(omega_inj_eV, x_cut=X_CUT):
-    """Mirror of the bridge's x_eff construction, for the record (x_raw, x_eff)."""
+    """Mirror of the bridge's line construction, for the record: (x_raw, x_line).
+    x_line = x_raw (floored at 1) if x_raw <= x_cut, else x_cut (where the overflow photons are re-injected)."""
     E_each = max(omega_inj_eV - 2.0*M_E_EV, 0.0) / 2.0
     g = 1.0 + E_each / M_E_EV
     raw = (4.0/3.0) * g**2 * (1.0 - 1.0/g**2) * E_CMB_MEAN_FACTOR
-    anchor = 0.9 * x_cut
-    if raw <= anchor:
-        return raw, max(raw, 1.0)
-    u = math.log(raw / anchor)
-    return raw, anchor + (x_cut - anchor) * u / (1.0 + u)
+    return raw, (max(raw, 1.0) if raw <= x_cut else x_cut)
+
+def check_pde_grid(r):
+    """The Rust binary must have been rebuilt with the SPECTROXIDE_X_MAX patch; otherwise the grid still ends at 60."""
+    xm = float(np.asarray(r.x, float)[-1])
+    if abs(xm - PDE_X_MAX) > 2.0:
+        raise RuntimeError(f"PDE grid ends at x = {xm:g}, expected {PDE_X_MAX:g}: patch spectroxide/src/cli.rs "
+                           f"(SPECTROXIDE_X_MAX) and run `cargo build --release` in the spectroxide folder")
 
 # ── decay redshift: z at which t(z) = tau (matter + radiation + Lambda, cosmology = COSMO_AK19) ──────
 def _build_t_of_z():
@@ -220,9 +233,9 @@ def run_cascade_point(dm_MeV, logtau):
         return dict(mu=float("nan"), y=float("nan"), status="skip_below_pair_threshold")
     kw = dict(method="pde", cosmo=COSMO_AK19, z_start=Z_START, z_end=Z_END, z_min=Z_END, z_max=Z_START,
               n_z=N_Z, x_min=X_MIN, x_max=X_MAX, n_x=N_X, timeout=TIMEOUT_S, dtau_max=DTAU_MAX)
-    dq_dz = make_mckeen_dq_dz(omega_inj_eV, gamma_x, DEN_FAC, x_max_factor=X_CUT)   # x_max_factor is ignored here
-    r_h = spectroxide.solve(dq_dz=dq_dz, **kw)
-    src = make_mckeen_photon_source(omega_inj_eV, gamma_x, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)
+    dq_dz = make_mckeen_dq_dz(omega_inj_eV, gamma_x, DEN_FAC, x_max_factor=X_CUT)   # x_max_factor = x_cut: switches on the overflow heat
+    r_h = spectroxide.solve(dq_dz=dq_dz, **kw); check_pde_grid(r_h)
+    src = make_mckeen_photon_source(omega_inj_eV, gamma_x, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN, x_top=X_TOP)
     r_p = spectroxide.solve(photon_source=src, x=X_TABLE, **kw)
 
     # ── RELAXED GRID CHECK (this replaces the old `if not np.allclose(r_h.x, r_p.x): raise ...`) ──────────
@@ -247,7 +260,7 @@ def run_cascade_point(dm_MeV, logtau):
 
     x_raw, x_eff = line_position(omega_inj_eV)
     z_decay = math.sqrt(2.39e19 * gamma_x)   # rough z at t = tau (radiation era)
-    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9 * X_CUT))
+    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > X_CUT))
     return dict(mu=mu, y=y, status="ok", x_cut=X_CUT, cascade_version=CASCADE_SETTINGS["version"], _flags=flags,
                 mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 grid_h=len(r_h.x), grid_p=len(r_p.x), grid_ok=grid_ok, **extra)
@@ -294,8 +307,8 @@ def preflight_electron(beta, dm_MeV):
     r2 = mpr21.mpr21_energy_injection_rate_eV_cm3_s(1.0e5, DEN_FAC, 1e-10, 2.0*E_e)
     if not (r1 > 0 and abs(r2/r1 - 2.0) < 1e-6):
         raise RuntimeError(f"mpr21 rate not linear in energy per decay (r2/r1={r2/r1 if r1 else None})")
-    v = make_mckeen_electron_dq_dz(E_e, 1e-10, DEN_FAC, E_rest_eV=E_rest)(1.0e5)
-    sp = make_mckeen_electron_photon_source(E_e, 1e-10, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)(X_TABLE, 1.0e5)
+    v = make_mckeen_electron_dq_dz(E_e, 1e-10, DEN_FAC, E_rest_eV=E_rest, x_cut=X_CUT)(1.0e5)
+    sp = make_mckeen_electron_photon_source(E_e, 1e-10, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN, x_top=X_TOP)(X_TABLE, 1.0e5)
     if not (np.isfinite(v) and v != 0.0 and np.all(np.isfinite(sp))):
         raise RuntimeError(f"electron closures fail silently for beta={beta:g}, dm={dm_MeV:g} (dq_dz={v!r})")
 
@@ -306,8 +319,9 @@ def run_electron_point(beta, dm_MeV, logtau):
         return dict(mu=float("nan"), y=float("nan"), status="skip_below_electron_cascade_min",
                     E_e_eV=E_e, T_n_eV=T_n, **cfg)
     gamma_x, kw = 10.0**(-logtau), _pde_kw()
-    r_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, DEN_FAC, E_rest_eV=E_rest), **kw)
-    src = make_mckeen_electron_photon_source(E_e, gamma_x, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN)
+    r_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, DEN_FAC, E_rest_eV=E_rest, x_cut=X_CUT), **kw)
+    check_pde_grid(r_h)
+    src = make_mckeen_electron_photon_source(E_e, gamma_x, DEN_FAC, x_max_factor=X_CUT, x_min=X_MIN, x_top=X_TOP)
     r_p = spectroxide.solve(photon_source=src, x=X_TABLE, **kw)
     mu, y = float(r_h.mu + r_p.mu), float(r_h.y + r_p.y)
     if not (math.isfinite(mu) and math.isfinite(y)) or (mu == 0.0 and y == 0.0):
@@ -323,7 +337,7 @@ def run_electron_point(beta, dm_MeV, logtau):
     except Exception as e:
         flags.append("line_probe_failed"); extra["line_probe_error"] = repr(e)[:200]
     x_raw, x_eff = electron_line_position(E_e, X_CUT)
-    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9*X_CUT))
+    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > X_CUT))
     return dict(mu=mu, y=y, status="ok", x_cut=X_CUT, beta=beta, E_e_eV=E_e, E_rest_eV=E_rest, T_n_eV=T_n, _flags=flags,
                 mu_heat=float(r_h.mu), y_heat=float(r_h.y), mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 grid_h=len(r_h.x), grid_p=len(r_p.x),

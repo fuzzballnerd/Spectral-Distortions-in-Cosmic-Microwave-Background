@@ -49,7 +49,7 @@ from Cascades.cascade.mckeen_bridge import (
 )
 
 BETAS = [0.0, 0.5, 0.9]
-SPEC_VERSION = 1
+SPEC_VERSION = 2          # x110: lines at their true x up to X_CUT = 110, recoil overflow above
 
 
 def pkey(beta, dm, logtau):
@@ -66,8 +66,9 @@ def run_point_spectrum(beta, dm_MeV, logtau):
         return dict(status="skip_no_electron_energy", E_e_eV=E_e, T_n_eV=T_n)
     gamma_x, kw = 10.0**(-logtau), cs._pde_kw()
 
-    r_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, cs.DEN_FAC, E_rest_eV=E_rest), **kw)
-    src = make_mckeen_electron_photon_source(E_e, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN)
+    r_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, cs.DEN_FAC, E_rest_eV=E_rest, x_cut=cs.X_CUT), **kw)
+    cs.check_pde_grid(r_h)
+    src = make_mckeen_electron_photon_source(E_e, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN, x_top=cs.X_TOP)
     r_p = spectroxide.solve(photon_source=src, x=cs.X_TABLE, **kw)
 
     xh, dh = np.asarray(r_h.x, float), np.asarray(r_h.delta_n, float)
@@ -94,11 +95,11 @@ def run_point_spectrum(beta, dm_MeV, logtau):
     except Exception as e:
         flags.append("line_probe_failed"); extra["line_probe_error"] = repr(e)[:200]
     x_raw, x_eff = electron_line_position(E_e, cs.X_CUT)
-    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > 0.9*cs.X_CUT))
+    extra.update(x_raw=x_raw, x_eff=x_eff, line_pinned=bool(x_raw > cs.X_CUT))      # pinned = overflow now
 
     return dict(status="ok", spec_version=SPEC_VERSION, beta=beta, dm_MeV=dm_MeV, logtau=logtau,
                 E_e_eV=E_e, E_rest_eV=E_rest, T_n_eV=T_n,
-                elec_mode=cs.ELECTRON_MODE, x_cut=cs.X_CUT,
+                elec_mode=cs.ELECTRON_MODE, x_cut=cs.X_CUT, x_top=cs.X_TOP, pde_x_max=cs.PDE_X_MAX,
                 mu=mu, y=y, mu_heat=float(r_h.mu), y_heat=float(r_h.y),
                 mu_phot=float(r_p.mu), y_phot=float(r_p.y),
                 x_heat=_arr(xh), dn_heat=_arr(dh), x_phot=_arr(xp), dn_phot=_arr(dp),
@@ -114,18 +115,20 @@ def run_gamma_spectrum(dm_MeV, logtau):
     dm_eV, gamma_x, kw = dm_MeV*1e6, 10.0**(-logtau), cs._pde_kw()
     omega, T_n = omega_inj_and_Tn_eV(dm_eV)
     base = dict(spec_version=SPEC_VERSION, family="gamma", dm_MeV=dm_MeV, logtau=logtau,
-                omega_inj_eV=omega, T_n_eV=T_n, elec_mode=cs.ELECTRON_MODE, x_cut=cs.X_CUT)
+                omega_inj_eV=omega, T_n_eV=T_n, elec_mode=cs.ELECTRON_MODE, x_cut=cs.X_CUT,
+                x_top=cs.X_TOP, pde_x_max=cs.PDE_X_MAX)
     if not validate_omega_inj_for_high_energy(omega):          # photon below 2 m_e: the bridge cannot cascade it
         return dict(status="skip_below_pair_threshold", **base)
 
     # (1) photon cascade
-    src_g = make_mckeen_photon_source(omega, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN)
+    src_g = make_mckeen_photon_source(omega, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN, x_top=cs.X_TOP)
     rg_h = spectroxide.solve(dq_dz=make_mckeen_dq_dz(omega, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT), **kw)
+    cs.check_pde_grid(rg_h)
     rg_p = spectroxide.solve(photon_source=src_g, x=cs.X_TABLE, **kw)
     # (2) neutron beta-decay electron (same E_e as electron|beta=0)
     E_e, E_rest, _ = cs.electron_energies_eV(0.0, dm_MeV)
-    src_e = make_mckeen_electron_photon_source(E_e, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN)
-    re_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, cs.DEN_FAC, E_rest_eV=E_rest), **kw)
+    src_e = make_mckeen_electron_photon_source(E_e, gamma_x, cs.DEN_FAC, x_max_factor=cs.X_CUT, x_min=cs.X_MIN, x_top=cs.X_TOP)
+    re_h = spectroxide.solve(dq_dz=make_mckeen_electron_dq_dz(E_e, gamma_x, cs.DEN_FAC, E_rest_eV=E_rest, x_cut=cs.X_CUT), **kw)
     re_p = spectroxide.solve(photon_source=src_e, x=cs.X_TABLE, **kw)
 
     runs = {"heat_g": rg_h, "phot_g": rg_p, "heat_e": re_h, "phot_e": re_p}
@@ -154,9 +157,9 @@ def run_gamma_spectrum(dm_MeV, logtau):
             flags.append(f"line_probe_failed_{tag}")
     xg_raw, xg_eff = cs.line_position(omega)
     xe_raw, xe_eff = electron_line_position(E_e, cs.X_CUT)
-    extra.update(x_raw_g=xg_raw, x_eff_g=xg_eff, line_pinned_g=bool(xg_raw > 0.9*cs.X_CUT),
-                 x_raw_e=xe_raw, x_eff_e=xe_eff, line_pinned_e=bool(xe_raw > 0.9*cs.X_CUT),
-                 line_pinned=bool(xg_raw > 0.9*cs.X_CUT or xe_raw > 0.9*cs.X_CUT))
+    extra.update(x_raw_g=xg_raw, x_eff_g=xg_eff, line_pinned_g=bool(xg_raw > cs.X_CUT),
+                 x_raw_e=xe_raw, x_eff_e=xe_eff, line_pinned_e=bool(xe_raw > cs.X_CUT),
+                 line_pinned=bool(xg_raw > cs.X_CUT or xe_raw > cs.X_CUT))
 
     out = dict(status="ok", **base, E_e_eV=E_e, E_rest_eV=E_rest, mu=mu, y=y,
                x_tot=_arr(xt), dn_tot=_arr(dn_tot), _flags=flags, **extra)
@@ -287,9 +290,16 @@ def main():
     betas = [float(b) for b in args.betas]
     if args.points:
         with open(args.points) as fh:
-            combos = sorted({("electron", float(r["beta"]), snap_dm(float(r["dm_MeV"])), round(float(r["logtau"]), 3))
-                             for r in csv.DictReader(fh)})
-        betas = sorted({b for _, b, _, _ in combos})
+            rows = [(float(r["beta"]), snap_dm(float(r["dm_MeV"])), round(float(r["logtau"]), 3))
+                    for r in csv.DictReader(fh)]
+        if args.dm:                                    # only this machine's Delta m values
+            rows = [r for r in rows if r[1] in dms]
+        combos = []
+        if "electron" in args.families:
+            combos += sorted({("electron", b, dm, lt) for b, dm, lt in rows})
+        if "gamma" in args.families:                   # gamma has no beta: one point per (dm, logtau)
+            combos += sorted({("gamma", None, dm, lt) for _, dm, lt in rows})
+        betas = sorted({b for _, b, _, _ in combos if b is not None})
     else:
         combos = []
         if "electron" in args.families:
